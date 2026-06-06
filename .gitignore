@@ -1,0 +1,31 @@
+# Secrets — must never be committed
+secrets.h
+**/secrets.h
+claude_usage_display/secrets.h
+
+# Server runtime state
+server.pid
+server.log
+server.log.*
+usage_history.json
+usage_history.json.tmp
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Arduino build artifacts
+build/
+*.bin
+*.elf
+*.hex
