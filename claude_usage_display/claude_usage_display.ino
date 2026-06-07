@@ -22,7 +22,6 @@
 // Forward-declared so Arduino's auto-generated prototypes know these types.
 enum PageId      : int;
 enum ClaudeFrame : int;
-enum Mood        : int;
 
 // ============================================================
 // Config
@@ -153,23 +152,6 @@ enum ClaudeFrame : int {
   FRAME_BLINK  = 3,
   FRAME_WAVE   = 4,
 };
-
-enum Mood : int {
-  MOOD_HAPPY  = 0,
-  MOOD_STEADY = 1,
-  MOOD_WATCH  = 2,
-  MOOD_ALERT  = 3,
-  MOOD_LIMIT  = 4,
-};
-
-Mood moodFromPct(int p) {
-  if (p < 0)     return MOOD_STEADY;
-  if (p >= 100)  return MOOD_LIMIT;
-  if (p >= 90)   return MOOD_ALERT;
-  if (p >= 75)   return MOOD_WATCH;
-  if (p >= 50)   return MOOD_STEADY;
-  return MOOD_HAPPY;
-}
 
 // Full body — head, arms, lower body, legs. Used in boot and transitions.
 void drawClaude(int x, int y, int s, ClaudeFrame frame, int eyeShift = 0) {
@@ -359,8 +341,8 @@ void drawFreshPulse() {
   u8g2.drawLine (cx + 2, cy + 2, cx + 5, cy - 1);
 }
 
-// Tiny status glyph in the bottom-left corner. Kept at x=2 so it never paints
-// (0,63), where the page dots live.
+// Tiny status glyph in the bottom-left corner. Page text on the SESSION/WEEK/
+// EXTRA pages is indented past x=8 to leave room for it.
 void drawConnStatus() {
   bool stale   = haveData && (millis() - lastFetchMs > STALE_MS);
   bool nowifi  = WiFi.status() != WL_CONNECTED;
@@ -625,6 +607,12 @@ void renderSession(int xo) {
   currentBarVal(dispSesBarPct, sesBarFrom, sesBarTo, sesBarAnimStart);
   drawBar(xo + 4, 48, 120, 7, dispSesBarPct, sesPct >= 90);
 
+  // Status word (chill / steady / watch / ...), clear of the corner glyph.
+  if (sesStatus[0]) {
+    u8g2.setFont(u8g2_font_5x7_tf);
+    u8g2.drawStr(xo + 9, 62, sesStatus);
+  }
+
   // Celebrate when we're near the cap.
   bool waving = (waveStartMs > 0) && (millis() - waveStartMs < WAVE_DURATION);
   if (waving) {
@@ -646,12 +634,12 @@ void renderWeek(int xo) {
   currentBarVal(dispWkBarPct, wkBarFrom, wkBarTo, wkBarAnimStart);
   drawBar(xo + 4, 48, 120, 7, dispWkBarPct, wkPct >= 90);
 
-  // Projected end-of-window value, small, bottom-left.
+  // Projected end-of-window value, small, clear of the corner glyph.
   if (wkProjected >= 0) {
     char buf[14];
     snprintf(buf, sizeof(buf), "end~%d%%", wkProjected);
     u8g2.setFont(u8g2_font_5x7_tf);
-    u8g2.drawStr(xo + 0, 62, buf);
+    u8g2.drawStr(xo + 9, 62, buf);
   }
 }
 
@@ -694,7 +682,7 @@ void renderModels(int xo) {
 }
 
 // Two stacked sparkline rows. Layout per row:
-//   [0..17] label, [18..109] bars, [110..127] current value (right-aligned).
+//   [0..17] label, [18..103] bars, [104..127] current value (right-aligned).
 void renderTrend(int xo) {
   drawHeader("TREND", "");
 
@@ -702,7 +690,7 @@ void renderTrend(int xo) {
 
   // 5h row
   u8g2.drawStr(xo + 0, 20, "5h");
-  drawTrendBars(xo + 18, 12, 92, 10, trend5h, trend5hN);
+  drawTrendBars(xo + 18, 12, 86, 10, trend5h, trend5hN);
   char val[8];
   if (sesPct < 0) snprintf(val, sizeof(val), "--");
   else            snprintf(val, sizeof(val), "%d%%", sesPct);
@@ -711,7 +699,7 @@ void renderTrend(int xo) {
 
   // 7d row
   u8g2.drawStr(xo + 0, 41, "7d");
-  drawTrendBars(xo + 18, 33, 92, 10, trend7d, trend7dN);
+  drawTrendBars(xo + 18, 33, 86, 10, trend7d, trend7dN);
   if (wkPct < 0) snprintf(val, sizeof(val), "--");
   else           snprintf(val, sizeof(val), "%d%%", wkPct);
   vw = u8g2.getStrWidth(val);
@@ -737,7 +725,7 @@ void renderExtra(int xo) {
     snprintf(buf, sizeof(buf), "%.2f%s", extraUsed, extraCurrency);
   }
   u8g2.setFont(u8g2_font_5x7_tf);
-  u8g2.drawStr(xo + 0, 62, buf);
+  u8g2.drawStr(xo + 9, 62, buf);
 }
 
 void renderPage(PageId p, int xo) {
