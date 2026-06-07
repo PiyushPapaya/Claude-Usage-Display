@@ -9,8 +9,7 @@ if not exist server.pid (
 ) else (
   set /p PID=<server.pid
 
-  REM Only kill if this PID is actually a python process, so we never kill an
-  REM unrelated program that happened to reuse the PID after a crash.
+  REM Only kill it if the PID still belongs to python, in case it was reused.
   tasklist /fi "PID eq !PID!" /fo csv 2>nul | findstr /i "python" >nul
   if errorlevel 1 (
     echo PID !PID! is not a running python process - removing stale server.pid.
@@ -22,23 +21,20 @@ if not exist server.pid (
   )
 )
 
-REM ── 2. Kill any Claude CLI windows (cmd windows titled "Claude CLI") ─────────
-REM   These are the windows started by start.bat with title "Claude CLI".
-REM   We kill the whole window group by title via taskkill on the cmd host.
+REM ── 2. Close the "Claude CLI" window start.bat opened ────────────────────────
 taskkill /fi "WINDOWTITLE eq Claude CLI" /f >nul 2>&1
 if not errorlevel 1 (
   echo Claude CLI window closed.
 )
 
-REM ── 3. Kill claude.exe / claude processes directly (Claude Code CLI) ─────────
+REM ── 3. Kill the claude.exe process itself ────────────────────────────────────
 tasklist /fo csv 2>nul | findstr /i "claude.exe" >nul
 if not errorlevel 1 (
   taskkill /im claude.exe /f >nul 2>&1
   echo Claude Code process stopped.
 )
 
-REM Also catch Node-based Claude Code runner (claude is often a node script)
-REM We look for node.exe processes whose command line contains "claude"
+REM claude is often a node script, so also kill any node process running it.
 powershell -NoProfile -Command ^
   "Get-WmiObject Win32_Process | Where-Object { $_.Name -match 'node' -and $_.CommandLine -match 'claude' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; Write-Host ('Stopped Node/Claude PID ' + $_.ProcessId) }" 2>nul
 

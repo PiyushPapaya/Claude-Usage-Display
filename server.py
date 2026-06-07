@@ -1,30 +1,10 @@
 """
-Claude Usage Display - Server (V7.1)
+Claude usage server.
 
-Data source: api.anthropic.com/api/oauth/usage (undocumented OAuth endpoint,
-the exact one Claude Desktop / Claude Code uses for /usage).
-
-V7.1 fixes / hardening over V7:
-  - Safe logging under pythonw (no console): only attach a stderr handler when
-    a real stderr stream exists, otherwise every log() raised+swallowed an
-    AttributeError on Windows background launches.
-  - Atomic history writes (temp file + os.replace) so a kill mid-write can no
-    longer corrupt usage_history.json.
-  - Trend history is recorded only on scheduled fetches, not on manual
-    /refresh, keeping sample spacing even.
-  - Flask dev server runs threaded so /health and /usage don't block each other
-    while a fetch / token refresh is in flight.
-  - Cleaner shutdown and clearer error surfaces; behaviour otherwise unchanged.
-
-Earlier V7 features retained:
-  - Per-model breakdown (Opus / Sonnet / future codenames) sent to ESP
-  - Persistent trend history (survives restarts)
-  - /refresh and /health endpoints
-  - Auto token refresh via short-lived `claude` subprocess (closes itself)
-  - File logging with rotation
-  - Weekly burn-rate projection
-  - Correct sesActive (keyed on resets_at, not utilization)
-  - PID file so stop.bat can kill cleanly
+Reads the local Claude OAuth token and queries
+api.anthropic.com/api/oauth/usage - the same endpoint Claude Desktop and
+Claude Code use for /usage. Reshapes the response into the compact JSON the
+ESP8266 display expects and serves it over the LAN.
 """
 
 import json
@@ -48,25 +28,24 @@ CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
 USAGE_URL        = "https://api.anthropic.com/api/oauth/usage"
 USER_AGENT       = "claude-code/1.0.0"
 
-CACHE_TTL_OK     = 180     # 3 min between calls on success
-CACHE_TTL_ERR    = 30      # faster retry after error
-TREND_MAX        = 64      # ~3.2h of 5h-window samples at 3min cache
+CACHE_TTL_OK     = 180     # min seconds between upstream calls on success
+CACHE_TTL_ERR    = 30      # retry sooner after an error
+TREND_MAX        = 64      # samples kept per trend series
 
 HERE         = Path(__file__).parent.resolve()
 HISTORY_FILE = HERE / "usage_history.json"
 LOG_FILE     = HERE / "server.log"
 PID_FILE     = HERE / "server.pid"
 
-TOKEN_REFRESH_THRESHOLD_S = 30 * 60   # trigger refresh when <30 min to expiry
-TOKEN_REFRESH_COOLDOWN_S  = 30 * 60   # don't retry within 30 min
+TOKEN_REFRESH_THRESHOLD_S = 30 * 60   # refresh when this little time is left
+TOKEN_REFRESH_COOLDOWN_S  = 30 * 60   # don't try refreshing again within this
 
-HOST = "0.0.0.0"   # the ESP needs LAN access; keep behind your router/firewall
+HOST = "0.0.0.0"   # ESP needs LAN access; keep this behind your firewall
 PORT = 8080
 # ==================================================
 
 WEEKDAYS_DE = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
 
-# ----- logging -----
 logger = logging.getLogger("claude-usage")
 logger.setLevel(logging.INFO)
 
@@ -74,8 +53,9 @@ _fh = RotatingFileHandler(LOG_FILE, maxBytes=1_000_000, backupCount=3, encoding=
 _fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
 logger.addHandler(_fh)
 
-# pythonw.exe has no console, so sys.stderr is None. Attaching a StreamHandler
-# to a None stream makes every emit raise (and silently swallow) an error.
+# pythonw.exe has no console, so sys.stderr is None. Logging to a None stream
+# raises on every emit, so only attach the console handler when there's a real
+# stream to write to.
 if sys.stderr is not None:
     _sh = logging.StreamHandler(sys.stderr)
     _sh.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", datefmt="%H:%M:%S"))
@@ -86,7 +66,7 @@ def log(msg: str) -> None:
     logger.info(msg)
 
 
-# ===================== Persistent history =====================
+# ===================== Trend history =====================
 _history_5h: "deque[int]" = deque(maxlen=TREND_MAX)
 _history_7d: "deque[int]" = deque(maxlen=TREND_MAX)
 _history_lock = threading.Lock()
@@ -107,8 +87,8 @@ def _load_history() -> None:
 
 
 def _save_history() -> None:
-    """Atomic write: serialize to a temp file then os.replace() over the real
-    one. A crash/kill can never leave a half-written (unparseable) JSON file."""
+    # Write to a temp file then os.replace() so a kill mid-write can't leave a
+    # half-written, unparseable history file behind.
     try:
         payload = json.dumps({
             "h5": list(_history_5h),
@@ -157,7 +137,7 @@ def load_token():
 
 
 def _maybe_refresh_token_async(seconds_left):
-    """If token expires soon, spawn `claude` briefly to force a refresh."""
+    """Spawn `claude` to force a token refresh when expiry is near."""
     global _last_token_refresh
     if seconds_left is None or seconds_left > TOKEN_REFRESH_THRESHOLD_S:
         return
@@ -170,8 +150,8 @@ def _maybe_refresh_token_async(seconds_left):
 
 
 def _run_claude_refresh():
-    """Run `claude -p hi` in the background to trigger a token refresh,
-    then make sure it's gone. claude in print mode exits on its own."""
+    # `claude -p hi` runs in print mode, refreshes the token as a side effect,
+    # and exits on its own. We just wait for it (or kill it if it hangs).
     log("token refresh: launching claude -p hi ...")
     try:
         kwargs = dict(
@@ -180,7 +160,7 @@ def _run_claude_refresh():
             stderr=subprocess.DEVNULL,
         )
         if sys.platform == "win32":
-            # No console window, detached so server can exit cleanly even if hung
+            # No window, and detached so we can exit even if claude hangs.
             kwargs["creationflags"] = (
                 subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS
             )
@@ -302,15 +282,15 @@ def compute(record_history=True):
     fh_rel, fh_abs, fh_sec = reset_labels(fh.get("resets_at"))
     sd_rel, sd_abs, sd_sec = reset_labels(sd.get("resets_at"))
 
-    # Record a trend sample only on scheduled fetches (not manual /refresh),
-    # so the sparkline keeps a consistent time spacing.
+    # Only sample on the scheduled fetches, not manual /refresh, so the
+    # sparkline keeps even time spacing.
     if record_history:
         with _history_lock:
             if fh_pct >= 0: _history_5h.append(fh_pct)
             if sd_pct >= 0: _history_7d.append(sd_pct)
             _save_history()
 
-    # ------ per-model breakdown ------
+    # Every remaining dict with a utilization is a per-model entry.
     SKIP = {"five_hour", "seven_day", "extra_usage"}
     models = []
     for k, v in raw.items():
@@ -331,10 +311,9 @@ def compute(record_history=True):
         })
     models.sort(key=lambda m: m["label"])
 
-    # ------ session active flag (proper) ------
+    # A session is active when the 5h window has a reset time still ahead.
     ses_active = bool(fh.get("resets_at")) and fh_sec > 0
 
-    # ------ extra usage ------
     extra_pct      = pct_from(extra)
     extra_used     = float(extra.get("used_credits") or 0)
     extra_limit    = float(extra.get("monthly_limit") or 0)
@@ -342,8 +321,8 @@ def compute(record_history=True):
     extra_currency = extra.get("currency") or ""
     extra_rel, extra_abs, extra_sec = reset_labels(extra.get("resets_at"))
 
-    # ------ weekly burn-rate projection ------
-    # Project end-of-window pct assuming current rate continues.
+    # Extrapolate the 7-day percentage to the end of the window, assuming the
+    # current burn rate holds.
     weekly_projected = -1
     WEEKLY_WINDOW_S = 7 * 86400
     if sd_pct >= 0 and 0 < sd_sec < WEEKLY_WINDOW_S:
@@ -412,7 +391,7 @@ def route_usage():
 @app.route("/refresh")
 def route_refresh():
     log("manual /refresh requested")
-    # Force a fresh fetch but don't distort the trend's even spacing.
+    # Force a fetch, but don't record a sample - that would skew the spacing.
     return jsonify(_compute_cached(force=True, record_history=False))
 
 
@@ -435,7 +414,7 @@ def route_health():
 
 @app.route("/raw")
 def route_raw():
-    # Debug only: returns the full upstream payload (may include account info).
+    # Debug only - returns the full upstream payload, account info and all.
     data, err, _ = fetch_raw()
     return jsonify({"ok": err is None, "error": err, "data": data})
 
@@ -443,7 +422,7 @@ def route_raw():
 @app.route("/")
 def route_root():
     return (
-        "claude-usage V7.1\n"
+        "claude-usage\n"
         "  GET /usage   - ESP-shaped JSON\n"
         "  GET /refresh - force a fresh fetch\n"
         "  GET /health  - status snapshot (no API call)\n"
@@ -461,8 +440,8 @@ def main():
     log(f"  log:     {LOG_FILE}")
     log(f"  pid:     {PID_FILE}")
     log(f"  history: {HISTORY_FILE}")
-    # threaded=True so a slow upstream fetch can't block /health or a second
-    # /usage poll. use_reloader=False so we don't fork a second PID.
+    # threaded so a slow upstream fetch can't block /health or another /usage
+    # poll; no reloader so we don't end up with a second PID.
     app.run(host=HOST, port=PORT, debug=False, use_reloader=False, threaded=True)
 
 

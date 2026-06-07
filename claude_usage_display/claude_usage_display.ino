@@ -1,26 +1,10 @@
-// claude_usage_display.ino — V8
+// claude_usage_display.ino
 //
-// Changes from V7:
-//   - Removed Claude faces from SESSION, WEEK, EXTRA bar-chart pages
-//   - Removed Claude face from bottom of TREND page
-//   - Fixed TREND page: label text and bar chart no longer overlap
-//     (bars now start at x=18, labels left-aligned, value right-aligned)
-//   - Fixed random white dot at bottom-left (drawConnStatus idle pixel moved
-//     to x=2 so it can't land at 0,63 which collides with page-dot region)
-//   - Fixed random white line / flash artifact on left edge: all bar & trend
-//     draws now guard against x < 0 and xo offsets are clamped
-//   - Boot animation: added small status text ("Connecting…" / "Fetching…"
-//     / "Ready") in top-left at 5x7, very small, updates live
-//   - Boot animation smoother: breathing uses sinf with finer step,
-//     eye-look animation updated to cubic easing
-//   - All animations use easeInOutCubic throughout for silkier feel
-//   - Arduino keeps a lastDataHash to detect actual data changes
-//   - Server reachability check separate from data-change check
-//   - Added SERVER_CHECK_MS (10 s) for lightweight server-alive ping
-//   - WiFi reconnect uses exponential backoff (5 s → 10 s → 20 s, cap 60 s)
-//   - POLL_MS reduced to 30 s so display stays fresher
-//   - Connection-status glyph bottom-left never draws at pixel (0,63)
-//   - Fresh-data tick refined (cleaner checkmark, smoother slide)
+// ESP8266 + SH1106 128x64 OLED. Polls the local usage server over WiFi and
+// shows Claude's session/weekly limits across a few auto-rotating pages, with
+// a small pixel-Claude that animates the page transitions.
+//
+// Needs secrets.h (copy secrets.h.example) for WiFi creds and the server URL.
 
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
@@ -35,7 +19,7 @@
   #error "secrets.h missing or incomplete. Copy secrets.h.example to secrets.h and fill in."
 #endif
 
-// Forward-declare enums so Arduino's auto-prototype generator sees the types.
+// Forward-declared so Arduino's auto-generated prototypes know these types.
 enum PageId      : int;
 enum ClaudeFrame : int;
 enum Mood        : int;
@@ -44,17 +28,17 @@ enum Mood        : int;
 // Config
 // ============================================================
 static const unsigned long POLL_MS          = 30000;   // full data fetch
-static const unsigned long SERVER_CHECK_MS  = 10000;   // lightweight alive ping
-static const unsigned long PAGE_DURATION    = 7000;
-static const unsigned long TRANSITION_MS    = 1500;
-static const unsigned long BAR_ANIM_MS      = 700;
-static const unsigned long RENDER_FAST_MS   = 22;      // ~45fps during anim
-static const unsigned long RENDER_SLOW_MS   = 70;      // ~14fps idle
-static const unsigned long STALE_MS         = 10UL * 60UL * 1000UL;
-static const unsigned long WAVE_DURATION    = 2500;
-static const unsigned long FRESH_PULSE_MS   = 1600;
-static const unsigned long WANDER_GAP_MS    = 14000;
-static const unsigned long WIFI_BACKOFF_CAP = 60000;
+static const unsigned long SERVER_CHECK_MS  = 10000;   // cheap alive ping
+static const unsigned long PAGE_DURATION    = 7000;    // time on each page
+static const unsigned long TRANSITION_MS    = 1500;    // page-flip animation
+static const unsigned long BAR_ANIM_MS      = 700;     // bar grow/shrink
+static const unsigned long RENDER_FAST_MS   = 22;      // ~45fps while animating
+static const unsigned long RENDER_SLOW_MS   = 70;      // ~14fps when idle
+static const unsigned long STALE_MS         = 10UL * 60UL * 1000UL;  // data age limit
+static const unsigned long WAVE_DURATION    = 2500;    // session-90 celebration
+static const unsigned long FRESH_PULSE_MS   = 1600;    // checkmark after a fetch
+static const unsigned long WANDER_GAP_MS    = 14000;   // idle-walk interval
+static const unsigned long WIFI_BACKOFF_CAP = 60000;   // max reconnect wait
 
 #define MAX_MODELS 6
 #define TREND_MAX  64
@@ -97,19 +81,18 @@ unsigned long lastSuccessMs     = 0;
 unsigned long wifiLostMs        = 0;
 unsigned long wifiBackoff       = 5000;
 
-// Wave trigger (one-shot when SESSION crosses 90)
+// Fires once when the session percentage crosses 90.
 int           prevSesPct        = -1;
 unsigned long waveStartMs       = 0;
 
-// Idle wander (during error / stale screens)
+// Little Claude walking across the boot screen while we wait.
 unsigned long lastWanderMs      = 0;
 unsigned long wanderStartMs     = 0;
 bool          wanderActive      = false;
 
-// Data-change detection — compare a cheap hash of key values
+// Hash of the key values, to tell whether anything actually changed.
 uint32_t      lastDataHash      = 0;
 
-// Boot status text (tiny, top-left)
 char          bootStatusText[24] = "Starting...";
 
 // ============================================================
@@ -160,7 +143,8 @@ inline float easeOutBack(float t) {
 inline float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
 
 // ============================================================
-// Claude pixel art (parameterised: scale + frame + eye direction)
+// Claude pixel art — drawn from primitives, parameterised by
+// scale, animation frame and eye direction.
 // ============================================================
 enum ClaudeFrame : int {
   FRAME_STAND  = 0,
@@ -187,7 +171,7 @@ Mood moodFromPct(int p) {
   return MOOD_HAPPY;
 }
 
-// Full Claude (head + arms + body + legs). Used in boot and transitions.
+// Full body — head, arms, lower body, legs. Used in boot and transitions.
 void drawClaude(int x, int y, int s, ClaudeFrame frame, int eyeShift = 0) {
   if (s < 1) s = 1;
   u8g2.drawBox(x + 1*s, y + 0*s, 14*s, 5*s);             // head
@@ -222,7 +206,7 @@ void drawClaude(int x, int y, int s, ClaudeFrame frame, int eyeShift = 0) {
   }
 }
 
-// Assembly animation — used once on boot. stage: 1=head, 2=+arms, 3=+legs, 4=+eyes.
+// Boot-time build-up. stage: 1=head, 2=+arms, 3=+legs, 4=+eyes.
 void drawClaudeAssembling(int x, int y, int s, int stage) {
   if (stage >= 1) u8g2.drawBox(x + 1*s, y + 0*s, 14*s, 5*s);
   if (stage >= 2) u8g2.drawBox(x + 0*s, y + 5*s, 16*s, 3*s);
@@ -241,15 +225,13 @@ void drawClaudeAssembling(int x, int y, int s, int stage) {
   }
 }
 
-// Wave variant — head only, raised hand. Celebration when SESSION >= 90.
+// Head with a raised, bouncing hand — the session >= 90 celebration.
 void drawClaudeWavingHead(int x, int y, int s) {
-  // head
   u8g2.drawBox(x + 1*s, y + 0*s, 14*s, 5*s);
   u8g2.setDrawColor(0);
   u8g2.drawBox(x + 3*s,  y + 2*s, 2*s, s);
   u8g2.drawBox(x + 11*s, y + 2*s, 2*s, s);
   u8g2.setDrawColor(1);
-  // raised hand (bounces)
   bool up = (millis() / 200) % 2;
   int handY = y - 3*s - (up ? s : 0);
   u8g2.drawBox(x + 12*s, handY, 2*s, 3*s);
@@ -285,7 +267,7 @@ void drawSpeechBubble(int cx, int topY, const char* text, float openness) {
   }
 }
 
-// Progress bar. urgent=true -> subtle dither pulse.
+// Progress bar. urgent gives the fill a flickering dither so it reads as "hot".
 void drawBar(int x, int y, int w, int h, float pct, bool urgent) {
   if (x < 0) { w += x; x = 0; }
   if (w <= 0) return;
@@ -307,12 +289,12 @@ void drawBar(int x, int y, int w, int h, float pct, bool urgent) {
   }
 }
 
-// Trend bars — fixed layout, bars start at xBars, labels/values outside.
+// Sparkline of recent samples. Caller positions it so labels/values sit outside.
 void drawTrendBars(int x, int y, int w, int h, int* values, int count) {
   if (x < 0) { w += x; x = 0; }
   if (w <= 0 || count <= 0) return;
 
-  // Dotted baseline
+  // Dotted baseline along the bottom.
   for (int px = x; px < x + w; px += 2) u8g2.drawPixel(px, y + h - 1);
 
   for (int i = 0; i < count; i++) {
@@ -333,13 +315,13 @@ void drawTrendBars(int x, int y, int w, int h, int* values, int count) {
       u8g2.drawBox(xi, top, bw, filled);
     }
 
-    // Dotted unfilled ceiling
+    // Dotted outline above the fill.
     for (int yy = y; yy < top; yy += 2) {
       u8g2.drawPixel(xi, yy);
       if (bw > 1) u8g2.drawPixel(xi + bw - 1, yy);
     }
 
-    // Newest-sample notch
+    // Mark the newest sample with a notch.
     if (i == count - 1 && bw >= 2 && filled > 0 && top - 2 >= y) {
       u8g2.drawPixel(xi + bw / 2, top - 2);
     }
@@ -358,28 +340,27 @@ void drawPageDots() {
   }
 }
 
-// Slide-down checkmark tick top-right after a fresh fetch.
+// Checkmark that drops in top-right, holds, then slides back up after a fetch.
 void drawFreshPulse() {
   if (lastSuccessMs == 0) return;
   unsigned long age = millis() - lastSuccessMs;
   if (age > FRESH_PULSE_MS) return;
   float t = clamp01((float)age / FRESH_PULSE_MS);
 
-  // Smooth slide: ease in from top, hold, ease out upward
+  // Slide in, hold, slide out.
   int yOff;
   if      (t < 0.20f) yOff = (int)((1.0f - easeOutCubic(t / 0.20f)) * -8.0f);
   else if (t < 0.80f) yOff = 0;
   else                yOff = (int)(easeInCubic((t - 0.80f) / 0.20f) * -8.0f);
 
   int cx = 120, cy = 3 + yOff;
-  // Clean checkmark: 3 pixels
   u8g2.drawPixel(cx,     cy + 3);
   u8g2.drawPixel(cx + 1, cy + 4);
   u8g2.drawLine (cx + 2, cy + 2, cx + 5, cy - 1);
 }
 
-// Tiny bottom-left connection status glyph.
-// FIXED: idle pixel is at (2, y+3) — never at (0,63) which hit the dot row.
+// Tiny status glyph in the bottom-left corner. Kept at x=2 so it never paints
+// (0,63), where the page dots live.
 void drawConnStatus() {
   bool stale   = haveData && (millis() - lastFetchMs > STALE_MS);
   bool nowifi  = WiFi.status() != WL_CONNECTED;
@@ -387,7 +368,6 @@ void drawConnStatus() {
   bool fresh   = lastSuccessMs > 0 && (millis() - lastSuccessMs < FRESH_PULSE_MS);
   bool polling = (millis() - lastPoll < 1500) && lastPoll > 0;
 
-  // Place at x=2 so we never accidentally paint (0,63) — page dots live there.
   int x = 2, y = 60;
 
   if (nowifi) {
@@ -398,7 +378,7 @@ void drawConnStatus() {
   }
 
   if (!serverAlive && haveData) {
-    // server unreachable but we have cached data — show "!" glyph
+    // Server unreachable but we still have cached data — "!" glyph.
     u8g2.drawVLine(x + 1, y, 2);
     u8g2.drawPixel(x + 1, y + 3);
     return;
@@ -411,7 +391,7 @@ void drawConnStatus() {
   }
 
   if (stale) {
-    // Hourglass glyph
+    // Hourglass.
     u8g2.drawHLine(x, y,     4);
     u8g2.drawPixel(x + 1, y + 1);
     u8g2.drawPixel(x + 2, y + 1);
@@ -429,7 +409,7 @@ void drawConnStatus() {
   }
 
   if (!fresh) {
-    // Healthy idle — single faint pixel, at (2, y+3) not (0,63)
+    // Healthy idle — a single faint pixel.
     u8g2.drawPixel(x, y + 3);
   }
 }
@@ -443,7 +423,7 @@ void drawHeader(const char* pageName, const char* rightLbl) {
   }
 }
 
-// Huge percentage — logisoso28, no '%' sign.
+// Big centred percentage, no '%' sign.
 void drawBigPct(int xCenter, int baselineY, int pct) {
   char num[6];
   if (pct < 0) snprintf(num, sizeof(num), "--");
@@ -476,8 +456,8 @@ void checkWaveTrigger() {
   if (sesPct >= 0) prevSesPct = sesPct;
 }
 
-// Lightweight ping — just GET /status or the same endpoint and check HTTP 200.
-// Doesn't parse JSON; only sets serverAlive.
+// Cheap reachability check: GET the endpoint, look at the status code, don't
+// parse the body. Only updates serverAlive.
 bool pingServer() {
   if (WiFi.status() != WL_CONNECTED) { serverAlive = false; return false; }
   WiFiClient client;
@@ -490,8 +470,8 @@ bool pingServer() {
   return serverAlive;
 }
 
-// Compute a cheap hash of the key data values so we can detect real changes
-// without storing the full JSON.
+// Cheap hash over the values we care about, so we can spot a real change
+// without keeping the whole JSON around.
 uint32_t computeDataHash() {
   uint32_t h = (uint32_t)sesPct * 1000003u
              ^ (uint32_t)wkPct  * 999983u
@@ -511,7 +491,7 @@ bool fetchUsage() {
   int code = http.GET();
   if (code != 200) {
     lastError = "http " + String(code);
-    serverAlive = (code > 0);   // got a response = server is up, but data error
+    serverAlive = (code > 0);   // any response means the server answered
     http.end();
     return false;
   }
@@ -596,13 +576,9 @@ bool fetchUsage() {
   lastSuccessMs = millis();
   haveData      = true;
 
-  // Detect whether anything actually changed
-  uint32_t newHash = computeDataHash();
-  if (newHash != lastDataHash) {
-    lastDataHash = newHash;
-    // Trigger bar animations for new data
-    // (already handled per-field above)
-  }
+  // Bar animations are already started per-field above; the hash just records
+  // whether this fetch changed anything.
+  lastDataHash = computeDataHash();
 
   checkWaveTrigger();
   rebuildPageList();
@@ -644,13 +620,12 @@ void renderSession(int xo) {
     return;
   }
 
-  // Big number centred, no face
   drawBigPct(xo + 64, 44, sesPct);
 
   currentBarVal(dispSesBarPct, sesBarFrom, sesBarTo, sesBarAnimStart);
   drawBar(xo + 4, 48, 120, 7, dispSesBarPct, sesPct >= 90);
 
-  // Wave celebration still works — just the hand/head, no body on this page
+  // Celebrate when we're near the cap.
   bool waving = (waveStartMs > 0) && (millis() - waveStartMs < WAVE_DURATION);
   if (waving) {
     drawClaudeWavingHead(xo + 50, 55, 2);
@@ -671,7 +646,7 @@ void renderWeek(int xo) {
   currentBarVal(dispWkBarPct, wkBarFrom, wkBarTo, wkBarAnimStart);
   drawBar(xo + 4, 48, 120, 7, dispWkBarPct, wkPct >= 90);
 
-  // Projected end value — small text bottom-left, no face
+  // Projected end-of-window value, small, bottom-left.
   if (wkProjected >= 0) {
     char buf[14];
     snprintf(buf, sizeof(buf), "end~%d%%", wkProjected);
@@ -718,18 +693,14 @@ void renderModels(int xo) {
   }
 }
 
-// TREND page — FIXED: bars start at x=18 so label "5h"/"7d" and value
-// on the right never overlap the bar area.
-// Layout:
-//   [0..17]  label ("5h" or "7d") left-aligned
-//   [18..109] bars (92px wide)
-//   [110..127] current value right-aligned
+// Two stacked sparkline rows. Layout per row:
+//   [0..17] label, [18..109] bars, [110..127] current value (right-aligned).
 void renderTrend(int xo) {
   drawHeader("TREND", "");
 
   u8g2.setFont(u8g2_font_5x7_tf);
 
-  // ── 5h row ──
+  // 5h row
   u8g2.drawStr(xo + 0, 20, "5h");
   drawTrendBars(xo + 18, 12, 92, 10, trend5h, trend5hN);
   char val[8];
@@ -738,15 +709,13 @@ void renderTrend(int xo) {
   int vw = u8g2.getStrWidth(val);
   u8g2.drawStr(xo + 127 - vw, 20, val);
 
-  // ── 7d row ──
+  // 7d row
   u8g2.drawStr(xo + 0, 41, "7d");
   drawTrendBars(xo + 18, 33, 92, 10, trend7d, trend7dN);
   if (wkPct < 0) snprintf(val, sizeof(val), "--");
   else           snprintf(val, sizeof(val), "%d%%", wkPct);
   vw = u8g2.getStrWidth(val);
   u8g2.drawStr(xo + 127 - vw, 41, val);
-
-  // No Claude face at bottom of TREND page (removed per request)
 }
 
 void renderExtra(int xo) {
@@ -769,7 +738,6 @@ void renderExtra(int xo) {
   }
   u8g2.setFont(u8g2_font_5x7_tf);
   u8g2.drawStr(xo + 0, 62, buf);
-  // No Claude face (removed per request)
 }
 
 void renderPage(PageId p, int xo) {
@@ -783,8 +751,8 @@ void renderPage(PageId p, int xo) {
 }
 
 // ============================================================
-// Boot / connecting screen
-// statusGlyph: 0=just assembling, 1=wifi pending, 2=server pending, 3=ok, -1=err
+// Boot / connecting screen.
+// statusGlyph: -1=error, 1=wifi pending, 2=server pending, 3=ready.
 // ============================================================
 void renderBoot(int statusGlyph) {
   u8g2.clearBuffer();
@@ -806,12 +774,12 @@ void renderBoot(int statusGlyph) {
   int cx    = (128 - cw) / 2;
   int cy    = 9;
 
-  // Smooth breathing using easeInOutCubic on a sine wave
+  // Gentle breathing bob.
   float breathPhase = (float)(millis() % 2600) / 2600.0f;
   float breathSine  = sinf(breathPhase * 2.0f * 3.14159f);
   int   breath      = assembling ? 0 : (int)(breathSine * 1.2f);
 
-  // Eye look-around: cubic-eased sweep
+  // Eyes drift left/right.
   float eyePhase = (float)(millis() % 4200) / 4200.0f;
   float eyeSine  = sinf(eyePhase * 2.0f * 3.14159f);
   int   eyeShift = assembling ? 0 : (int)(eyeSine * 1.3f);
@@ -821,7 +789,7 @@ void renderBoot(int statusGlyph) {
   drawClaudeAssembling(cx, cy + breath, scale, stage);
 
   if (!assembling && stage >= 4) {
-    // Clear default eyes, re-draw with look/blink
+    // Erase the default eyes and redraw them looking/blinking.
     u8g2.setDrawColor(0);
     u8g2.drawBox(cx + 3*scale,  cy + breath + 1*scale, 2*scale, 3*scale);
     u8g2.drawBox(cx + 11*scale, cy + breath + 1*scale, 2*scale, 3*scale);
@@ -840,13 +808,13 @@ void renderBoot(int statusGlyph) {
     }
   }
 
-  // ── Tiny status text top-left (5x7) — shows what we're doing ──
+  // Tiny status line, top-left.
   if (!assembling) {
     u8g2.setFont(u8g2_font_4x6_tf);
     u8g2.drawStr(0, 6, bootStatusText);
   }
 
-  // ── Status glyph row — 3 dots: wifi, server, data ──
+  // Three dots: wifi, server, data.
   if (!assembling) {
     int gy = 60;
     int gxs[3] = { 56, 64, 72 };
@@ -856,7 +824,6 @@ void renderBoot(int statusGlyph) {
     else if (statusGlyph == 2)  { states[0] =  1; states[1] = 0; }
     else if (statusGlyph == 3)  { states[0] =  1; states[1] = 1; states[2] = 1; }
 
-    // Use smooth pulse — sine-based instead of hard blink
     float pulseSine = sinf((float)(millis() % 800) / 800.0f * 2.0f * 3.14159f);
     bool  pulseOn   = pulseSine > 0.0f;
 
@@ -874,7 +841,7 @@ void renderBoot(int statusGlyph) {
     }
   }
 
-  // ── Idle wander overlay (shown when stuck waiting, not during assembly) ──
+  // While we're stuck waiting, send Claude on a walk across the screen.
   if (!assembling) {
     if (wanderActive) {
       unsigned long el  = millis() - wanderStartMs;
@@ -898,7 +865,7 @@ void renderBoot(int statusGlyph) {
 }
 
 // ============================================================
-// Page transition — small Claude (scale 1), 1.5s
+// Page transition: little Claude walks the new page name in, then off.
 // ============================================================
 void renderTransition() {
   unsigned long elapsed = millis() - transitionStartMs;
@@ -1018,7 +985,7 @@ void connectWiFiAnimated() {
   while (WiFi.status() != WL_CONNECTED && millis() - t0 < 30000) {
     if (millis() - lastFrame >= 28) {
       lastFrame = millis();
-      // Animated dots so there's visible activity
+      // Cycle the trailing dots so the screen shows it's still working.
       dot = (dot + 1) % 4;
       char buf[24];
       snprintf(buf, sizeof(buf), "WiFi%.*s", dot, "...");
@@ -1043,7 +1010,7 @@ void setup() {
 
   bootEntryMs = millis();
 
-  // Phase 1: assembly + breath (no text during assembly)
+  // Let the boot animation assemble before we do anything else.
   unsigned long t0 = millis();
   while (millis() - t0 < 1800) {
     renderBoot(0);
@@ -1051,10 +1018,9 @@ void setup() {
     yield();
   }
 
-  // Phase 2: WiFi
   connectWiFiAnimated();
 
-  // Phase 3: first server contact
+  // First contact with the server — keep retrying for a while.
   snprintf(bootStatusText, sizeof(bootStatusText), "Fetching...");
   unsigned long t1 = millis();
   while (!haveData && millis() - t1 < 15000) {
@@ -1074,6 +1040,7 @@ void setup() {
     snprintf(bootStatusText, sizeof(bootStatusText), "No data");
   }
 
+  // Fall back to a minimal page set if we never got data.
   if (activePagesN == 0) {
     activePages[0] = { PAGE_SESSION, "SESSION" };
     activePages[1] = { PAGE_WEEK,    "WEEK" };

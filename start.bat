@@ -42,13 +42,8 @@ if exist server.pid (
     pause
 )
 
-REM --- Launch Claude CLI in a new window, run it, then close the window ---
-REM Uses a VBScript helper so we can launch claude.exe and wait for it to
-REM exit naturally before the wrapper cmd window also exits.
-REM The /wait flag on start keeps the parent from moving on; without it the
-REM cmd /c window fires-and-forgets. We use START /WAIT so the window lives
-REM exactly as long as the claude process does, then dies on its own.
-
+REM Open Claude CLI in its own window. /wait keeps the window alive exactly as
+REM long as claude runs, so it closes on its own when claude exits.
 echo Launching Claude CLI...
 start "Claude CLI" /wait cmd /c "claude"
 
