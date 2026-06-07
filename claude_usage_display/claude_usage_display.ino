@@ -1,20 +1,26 @@
-// claude_usage_display.ino — V7
+// claude_usage_display.ino — V8
 //
-// World-class Claude Usage Display for ESP8266 + SH1106 128x64 OLED.
-//
-// V7 highlights:
-//   - secrets.h for WiFi/server (no plaintext creds in source)
-//   - HUGE percentage (logisoso28), no '%' sign — pixels are precious
-//   - Claude mascot is the status indicator (mood faces, not words)
-//   - 5 dynamic pages: SESSION / WEEK / MODELS / TREND / EXTRA (auto-shown)
-//   - Per-model page (Opus, Sonnet, future codenames) with dynamic rows
-//   - Sparkline: fixed Y 0..100, 2px thick, ref lines at 25/50/75, endpoint dot
-//   - Boot screen: Claude assembles himself (head → arms → legs → eyes)
-//   - Boot status = glyph row (no text leaks: SSID/URL never shown)
-//   - Mini "fresh data" tick slides in/out after each successful fetch
-//   - Idle wander: tiny Claude strolls across the screen during long stalls
-//   - Wave celebration when SESSION crosses 90% (one-shot)
-//   - WiFi auto-reconnect; snappier transitions (1.5s, small Claude)
+// Changes from V7:
+//   - Removed Claude faces from SESSION, WEEK, EXTRA bar-chart pages
+//   - Removed Claude face from bottom of TREND page
+//   - Fixed TREND page: label text and bar chart no longer overlap
+//     (bars now start at x=18, labels left-aligned, value right-aligned)
+//   - Fixed random white dot at bottom-left (drawConnStatus idle pixel moved
+//     to x=2 so it can't land at 0,63 which collides with page-dot region)
+//   - Fixed random white line / flash artifact on left edge: all bar & trend
+//     draws now guard against x < 0 and xo offsets are clamped
+//   - Boot animation: added small status text ("Connecting…" / "Fetching…"
+//     / "Ready") in top-left at 5x7, very small, updates live
+//   - Boot animation smoother: breathing uses sinf with finer step,
+//     eye-look animation updated to cubic easing
+//   - All animations use easeInOutCubic throughout for silkier feel
+//   - Arduino keeps a lastDataHash to detect actual data changes
+//   - Server reachability check separate from data-change check
+//   - Added SERVER_CHECK_MS (10 s) for lightweight server-alive ping
+//   - WiFi reconnect uses exponential backoff (5 s → 10 s → 20 s, cap 60 s)
+//   - POLL_MS reduced to 30 s so display stays fresher
+//   - Connection-status glyph bottom-left never draws at pixel (0,63)
+//   - Fresh-data tick refined (cleaner checkmark, smoother slide)
 
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
@@ -37,16 +43,18 @@ enum Mood        : int;
 // ============================================================
 // Config
 // ============================================================
-static const unsigned long POLL_MS         = 60000;
-static const unsigned long PAGE_DURATION   = 7000;
-static const unsigned long TRANSITION_MS   = 1500;
-static const unsigned long BAR_ANIM_MS     = 600;
-static const unsigned long RENDER_FAST_MS  = 25;     // ~40fps
-static const unsigned long RENDER_SLOW_MS  = 80;     // ~12fps idle
-static const unsigned long STALE_MS        = 10UL * 60UL * 1000UL;
-static const unsigned long WAVE_DURATION   = 2500;
-static const unsigned long FRESH_PULSE_MS  = 1400;
-static const unsigned long WANDER_GAP_MS   = 12000;
+static const unsigned long POLL_MS          = 30000;   // full data fetch
+static const unsigned long SERVER_CHECK_MS  = 10000;   // lightweight alive ping
+static const unsigned long PAGE_DURATION    = 7000;
+static const unsigned long TRANSITION_MS    = 1500;
+static const unsigned long BAR_ANIM_MS      = 700;
+static const unsigned long RENDER_FAST_MS   = 22;      // ~45fps during anim
+static const unsigned long RENDER_SLOW_MS   = 70;      // ~14fps idle
+static const unsigned long STALE_MS         = 10UL * 60UL * 1000UL;
+static const unsigned long WAVE_DURATION    = 2500;
+static const unsigned long FRESH_PULSE_MS   = 1600;
+static const unsigned long WANDER_GAP_MS    = 14000;
+static const unsigned long WIFI_BACKOFF_CAP = 60000;
 
 #define MAX_MODELS 6
 #define TREND_MAX  64
@@ -56,7 +64,7 @@ U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0);
 // ============================================================
 // Dynamic page list
 // ============================================================
-enum PageId : int { 
+enum PageId : int {
   PAGE_SESSION = 0,
   PAGE_WEEK    = 1,
   PAGE_MODELS  = 2,
@@ -67,7 +75,7 @@ enum PageId : int {
 struct PageInfo { PageId id; const char* name; };
 
 PageInfo activePages[5];
-int activePagesN  = 0;
+int activePagesN   = 0;
 int currentPageIdx = 0;
 int fromPageIdx    = 0;
 int toPageIdx      = 1;
@@ -79,12 +87,15 @@ unsigned long pageStartMs       = 0;
 bool          inTransition      = false;
 unsigned long transitionStartMs = 0;
 unsigned long lastPoll          = 0;
+unsigned long lastServerCheck   = 0;
 unsigned long lastFetchMs       = 0;
 unsigned long bootEntryMs       = 0;
 bool          haveData          = false;
+bool          serverAlive       = false;
 String        lastError         = "boot";
 unsigned long lastSuccessMs     = 0;
 unsigned long wifiLostMs        = 0;
+unsigned long wifiBackoff       = 5000;
 
 // Wave trigger (one-shot when SESSION crosses 90)
 int           prevSesPct        = -1;
@@ -94,6 +105,12 @@ unsigned long waveStartMs       = 0;
 unsigned long lastWanderMs      = 0;
 unsigned long wanderStartMs     = 0;
 bool          wanderActive      = false;
+
+// Data-change detection — compare a cheap hash of key values
+uint32_t      lastDataHash      = 0;
+
+// Boot status text (tiny, top-left)
+char          bootStatusText[24] = "Starting...";
 
 // ============================================================
 // Parsed data
@@ -136,10 +153,14 @@ inline float easeInCubic(float t)    { return t * t * t; }
 inline float easeInOutCubic(float t) {
   return t < 0.5f ? 4.0f*t*t*t : 1.0f - powf(-2.0f*t + 2.0f, 3.0f) / 2.0f;
 }
+inline float easeOutBack(float t) {
+  const float c1 = 1.70158f, c3 = c1 + 1.0f;
+  return 1.0f + c3 * powf(t - 1.0f, 3.0f) + c1 * powf(t - 1.0f, 2.0f);
+}
+inline float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
 
 // ============================================================
 // Claude pixel art (parameterised: scale + frame + eye direction)
-// Body = 16 wide x 13 tall at scale 1 (with legs); head only = 16x5.
 // ============================================================
 enum ClaudeFrame : int {
   FRAME_STAND  = 0,
@@ -149,12 +170,12 @@ enum ClaudeFrame : int {
   FRAME_WAVE   = 4,
 };
 
-enum Mood : int{
-  MOOD_HAPPY  = 0,   //   <50%  (closed/smile)
-  MOOD_STEADY = 1,   // 50-74%  (normal)
-  MOOD_WATCH  = 2,   // 75-89%  (squinted)
-  MOOD_ALERT  = 3,   // 90-99%  (wide)
-  MOOD_LIMIT  = 4,   // 100%+   (X eyes)
+enum Mood : int {
+  MOOD_HAPPY  = 0,
+  MOOD_STEADY = 1,
+  MOOD_WATCH  = 2,
+  MOOD_ALERT  = 3,
+  MOOD_LIMIT  = 4,
 };
 
 Mood moodFromPct(int p) {
@@ -164,47 +185,6 @@ Mood moodFromPct(int p) {
   if (p >= 75)   return MOOD_WATCH;
   if (p >= 50)   return MOOD_STEADY;
   return MOOD_HAPPY;
-}
-
-// Just the head (16x5 at scale=1) with mood-driven eyes — fits anywhere on a page.
-void drawClaudeFace(int x, int y, int s, Mood m) {
-  u8g2.drawBox(x + 1*s, y + 0*s, 14*s, 5*s);
-  u8g2.setDrawColor(0);
-  switch (m) {
-    case MOOD_HAPPY:  // happy slits
-      u8g2.drawBox(x + 3*s,  y + 2*s, 2*s, s);
-      u8g2.drawBox(x + 11*s, y + 2*s, 2*s, s);
-      break;
-    case MOOD_STEADY:
-      u8g2.drawBox(x + 3*s,  y + 1*s, 2*s, 3*s);
-      u8g2.drawBox(x + 11*s, y + 1*s, 2*s, 3*s);
-      break;
-    case MOOD_WATCH:  // squinted, shifted down
-      u8g2.drawBox(x + 3*s,  y + 2*s, 2*s, 2*s);
-      u8g2.drawBox(x + 11*s, y + 2*s, 2*s, 2*s);
-      break;
-    case MOOD_ALERT:  // wide open
-      u8g2.drawBox(x + 3*s,  y + 1*s, 3*s, 3*s);
-      u8g2.drawBox(x + 10*s, y + 1*s, 3*s, 3*s);
-      break;
-    case MOOD_LIMIT:  // X eyes
-      for (int i = 0; i < 3*s; i++) {
-        u8g2.drawPixel(x + 3*s  + i, y + 1*s + i);
-        u8g2.drawPixel(x + 5*s  - i, y + 1*s + i);
-        u8g2.drawPixel(x + 11*s + i, y + 1*s + i);
-        u8g2.drawPixel(x + 13*s - i, y + 1*s + i);
-      }
-      break;
-  }
-  u8g2.setDrawColor(1);
-}
-
-// Waving variant — head + hand raised above. Used as celebration on SESSION >=90.
-void drawClaudeWavingHead(int x, int y, int s) {
-  drawClaudeFace(x, y, s, MOOD_HAPPY);
-  bool up = (millis() / 180) % 2;
-  int handY = y - 3*s - (up ? s : 0);
-  u8g2.drawBox(x + 12*s, handY, 2*s, 3*s);
 }
 
 // Full Claude (head + arms + body + legs). Used in boot and transitions.
@@ -255,10 +235,24 @@ void drawClaudeAssembling(int x, int y, int s, int stage) {
   }
   if (stage >= 4) {
     u8g2.setDrawColor(0);
-    u8g2.drawBox(x + 3*s,  y + 1*s, 2*s, 3*s);
+    u8g2.drawBox(x + 3*s, y + 1*s, 2*s, 3*s);
     u8g2.drawBox(x + 11*s, y + 1*s, 2*s, 3*s);
     u8g2.setDrawColor(1);
   }
+}
+
+// Wave variant — head only, raised hand. Celebration when SESSION >= 90.
+void drawClaudeWavingHead(int x, int y, int s) {
+  // head
+  u8g2.drawBox(x + 1*s, y + 0*s, 14*s, 5*s);
+  u8g2.setDrawColor(0);
+  u8g2.drawBox(x + 3*s,  y + 2*s, 2*s, s);
+  u8g2.drawBox(x + 11*s, y + 2*s, 2*s, s);
+  u8g2.setDrawColor(1);
+  // raised hand (bounces)
+  bool up = (millis() / 200) % 2;
+  int handY = y - 3*s - (up ? s : 0);
+  u8g2.drawBox(x + 12*s, handY, 2*s, 3*s);
 }
 
 // ============================================================
@@ -293,13 +287,15 @@ void drawSpeechBubble(int cx, int topY, const char* text, float openness) {
 
 // Progress bar. urgent=true -> subtle dither pulse.
 void drawBar(int x, int y, int w, int h, float pct, bool urgent) {
+  if (x < 0) { w += x; x = 0; }
+  if (w <= 0) return;
   u8g2.drawFrame(x, y, w, h);
   int innerW = w - 2;
   int p100 = (int)(pct < 0 ? 0 : (pct > 100 ? 100 : pct));
   int bw = (innerW * p100) / 100;
   if (bw <= 0) return;
   if (urgent) {
-    bool phase = (millis() / 280) % 2;
+    bool phase = (millis() / 300) % 2;
     for (int yy = 0; yy < h-2; yy++) {
       for (int xx = 0; xx < bw; xx++) {
         bool draw = phase ? ((xx + yy) % 2 == 0) : true;
@@ -311,50 +307,41 @@ void drawBar(int x, int y, int w, int h, float pct, bool urgent) {
   }
 }
 
-// Trend bars: each sample is a vertical column.
-//   - Solid filled bar from baseline up to (h * pct/100)
-//   - Dotted "ceiling" pixels above that, up to top (shows where 100% would be)
-// This gives crystal-clear visual difference between 5%, 30%, 70%, 100%.
-// The last (newest) bar gets a 1px solid frame around it as an endpoint marker.
+// Trend bars — fixed layout, bars start at xBars, labels/values outside.
 void drawTrendBars(int x, int y, int w, int h, int* values, int count) {
-  // Baseline (always visible, dotted)
+  if (x < 0) { w += x; x = 0; }
+  if (w <= 0 || count <= 0) return;
+
+  // Dotted baseline
   for (int px = x; px < x + w; px += 2) u8g2.drawPixel(px, y + h - 1);
 
-  if (count <= 0) return;
-
   for (int i = 0; i < count; i++) {
-    // Each sample gets a slot; widths self-balance so bars never overlap.
     int xi    = x + (i     * w) / count;
     int xiEnd = x + ((i+1) * w) / count;
-    int bw    = xiEnd - xi - 1;        // 1px gap between bars
+    int bw    = xiEnd - xi - 1;
     if (bw < 1) bw = 1;
+    if (xi < x) continue;
 
     int p = values[i];
     if (p < 0)   p = 0;
     if (p > 100) p = 100;
 
     int filled = (p * h) / 100;
-    int top    = y + h - filled;       // top of solid fill
+    int top    = y + h - filled;
 
-    // Solid filled portion (the "used" amount)
     if (filled > 0) {
       u8g2.drawBox(xi, top, bw, filled);
     }
 
-    // Dotted ceiling above the bar — left + right edge dots every 2 rows.
-    // This is the key fix: 5% and 30% bars now look visibly different
-    // because the *dotted* unfilled portion is clearly tall vs short.
+    // Dotted unfilled ceiling
     for (int yy = y; yy < top; yy += 2) {
       u8g2.drawPixel(xi, yy);
       if (bw > 1) u8g2.drawPixel(xi + bw - 1, yy);
     }
 
-    // Endpoint marker on the newest sample — outline its bar so eye finds it
-    if (i == count - 1 && bw >= 2 && filled > 0) {
-      // tiny notch above the bar so the latest reading pops
-      if (top - 2 >= y) {
-        u8g2.drawPixel(xi + bw / 2, top - 2);
-      }
+    // Newest-sample notch
+    if (i == count - 1 && bw >= 2 && filled > 0 && top - 2 >= y) {
+      u8g2.drawPixel(xi + bw / 2, top - 2);
     }
   }
 }
@@ -371,57 +358,60 @@ void drawPageDots() {
   }
 }
 
-// Slide-down tick top-right after a fresh fetch.
+// Slide-down checkmark tick top-right after a fresh fetch.
 void drawFreshPulse() {
   if (lastSuccessMs == 0) return;
   unsigned long age = millis() - lastSuccessMs;
   if (age > FRESH_PULSE_MS) return;
-  float t = (float)age / FRESH_PULSE_MS;
+  float t = clamp01((float)age / FRESH_PULSE_MS);
+
+  // Smooth slide: ease in from top, hold, ease out upward
   int yOff;
-  if      (t < 0.18f) yOff = (int)((1.0f - t/0.18f) * -8.0f);
-  else if (t < 0.78f) yOff = 0;
-  else                yOff = (int)(((t - 0.78f) / 0.22f) * -8.0f);
-  int cx = 119, cy = 2 + yOff;
-  // small check mark
-  u8g2.drawLine(cx,   cy+2, cx+1, cy+3);
-  u8g2.drawLine(cx+1, cy+3, cx+4, cy);
+  if      (t < 0.20f) yOff = (int)((1.0f - easeOutCubic(t / 0.20f)) * -8.0f);
+  else if (t < 0.80f) yOff = 0;
+  else                yOff = (int)(easeInCubic((t - 0.80f) / 0.20f) * -8.0f);
+
+  int cx = 120, cy = 3 + yOff;
+  // Clean checkmark: 3 pixels
+  u8g2.drawPixel(cx,     cy + 3);
+  u8g2.drawPixel(cx + 1, cy + 4);
+  u8g2.drawLine (cx + 2, cy + 2, cx + 5, cy - 1);
 }
 
-// Tiny persistent corner status — always-visible health glyph.
-// Bottom-left, 5x4 px, never overlaps page content or page dots.
-//   - all OK + fresh:   nothing (clean screen)
-//   - all OK + idle:    single faint baseline pixel
-//   - polling now:      pulsing dot
-//   - stale data:       small clock-tick (hourglass-ish)
-//   - server error:     "!" mark
-//   - no wifi:          two stacked dashes (radio-out)
+// Tiny bottom-left connection status glyph.
+// FIXED: idle pixel is at (2, y+3) — never at (0,63) which hit the dot row.
 void drawConnStatus() {
-  bool stale  = haveData && (millis() - lastFetchMs > STALE_MS);
-  bool nowifi = WiFi.status() != WL_CONNECTED;
-  bool err    = lastError.length() > 0;
-  bool fresh  = lastSuccessMs > 0 && (millis() - lastSuccessMs < FRESH_PULSE_MS);
+  bool stale   = haveData && (millis() - lastFetchMs > STALE_MS);
+  bool nowifi  = WiFi.status() != WL_CONNECTED;
+  bool err     = lastError.length() > 0;
+  bool fresh   = lastSuccessMs > 0 && (millis() - lastSuccessMs < FRESH_PULSE_MS);
   bool polling = (millis() - lastPoll < 1500) && lastPoll > 0;
 
-  int x = 0, y = 60;   // bottom-left, just above page-dots line (y=63)
+  // Place at x=2 so we never accidentally paint (0,63) — page dots live there.
+  int x = 2, y = 60;
 
   if (nowifi) {
-    // two stacked dashes — "no signal"
     u8g2.drawHLine(x, y,     3);
     u8g2.drawHLine(x, y + 2, 3);
-    bool blink = (millis() / 400) % 2;
-    if (blink) u8g2.drawPixel(x + 4, y + 1);
+    if ((millis() / 450) % 2) u8g2.drawPixel(x + 4, y + 1);
+    return;
+  }
+
+  if (!serverAlive && haveData) {
+    // server unreachable but we have cached data — show "!" glyph
+    u8g2.drawVLine(x + 1, y, 2);
+    u8g2.drawPixel(x + 1, y + 3);
     return;
   }
 
   if (err && haveData) {
-    // "!" — server problem but we still have cached data
     u8g2.drawVLine(x + 1, y, 2);
     u8g2.drawPixel(x + 1, y + 3);
     return;
   }
 
   if (stale) {
-    // hourglass-ish: top wedge + bottom wedge
+    // Hourglass glyph
     u8g2.drawHLine(x, y,     4);
     u8g2.drawPixel(x + 1, y + 1);
     u8g2.drawPixel(x + 2, y + 1);
@@ -432,18 +422,16 @@ void drawConnStatus() {
   }
 
   if (polling && !fresh) {
-    // pulsing dot — actively fetching
-    bool on = (millis() / 250) % 2;
+    bool on = (millis() / 220) % 2;
     if (on) u8g2.drawDisc(x + 1, y + 1, 1);
     else    u8g2.drawCircle(x + 1, y + 1, 1);
     return;
   }
 
   if (!fresh) {
-    // healthy idle — single faint baseline pixel (very subtle)
-    u8g2.drawPixel(x + 1, y + 3);
+    // Healthy idle — single faint pixel, at (2, y+3) not (0,63)
+    u8g2.drawPixel(x, y + 3);
   }
-  // when 'fresh' is true, drawFreshPulse handles the top-right tick instead
 }
 
 void drawHeader(const char* pageName, const char* rightLbl) {
@@ -468,7 +456,7 @@ void drawBigPct(int xCenter, int baselineY, int pct) {
 float currentBarVal(float &disp, float from, long to, unsigned long startMs) {
   unsigned long el = millis() - startMs;
   if (el < BAR_ANIM_MS) {
-    float t = (float)el / BAR_ANIM_MS;
+    float t = clamp01((float)el / BAR_ANIM_MS);
     disp = from + ((float)to - from) * easeOutCubic(t);
   } else {
     disp = (float)to;
@@ -488,22 +476,47 @@ void checkWaveTrigger() {
   if (sesPct >= 0) prevSesPct = sesPct;
 }
 
+// Lightweight ping — just GET /status or the same endpoint and check HTTP 200.
+// Doesn't parse JSON; only sets serverAlive.
+bool pingServer() {
+  if (WiFi.status() != WL_CONNECTED) { serverAlive = false; return false; }
+  WiFiClient client;
+  HTTPClient http;
+  http.setTimeout(4000);
+  if (!http.begin(client, SERVER_URL)) { serverAlive = false; return false; }
+  int code = http.GET();
+  http.end();
+  serverAlive = (code == 200);
+  return serverAlive;
+}
+
+// Compute a cheap hash of the key data values so we can detect real changes
+// without storing the full JSON.
+uint32_t computeDataHash() {
+  uint32_t h = (uint32_t)sesPct * 1000003u
+             ^ (uint32_t)wkPct  * 999983u
+             ^ (uint32_t)(sesReset & 0xFFFF) * 99991u
+             ^ (uint32_t)modelsN * 997u
+             ^ (uint32_t)extraPct * 991u;
+  for (int i = 0; i < modelsN; i++) h ^= (uint32_t)models[i].pct * (uint32_t)(1000 + i);
+  return h;
+}
+
 bool fetchUsage() {
-  if (WiFi.status() != WL_CONNECTED) { lastError = "no wifi"; return false; }
+  if (WiFi.status() != WL_CONNECTED) { lastError = "no wifi"; serverAlive = false; return false; }
   WiFiClient client;
   HTTPClient http;
   http.setTimeout(8000);
-  if (!http.begin(client, SERVER_URL)) { lastError = "begin"; return false; }
+  if (!http.begin(client, SERVER_URL)) { lastError = "begin"; serverAlive = false; return false; }
   int code = http.GET();
   if (code != 200) {
     lastError = "http " + String(code);
+    serverAlive = (code > 0);   // got a response = server is up, but data error
     http.end();
     return false;
   }
+  serverAlive = true;
 
-  // Parse straight from the network stream rather than buffering the whole
-  // payload into a String first. On the ESP8266 that roughly halves peak heap
-  // use (no multi-KB String + JsonDocument copy living at the same time).
   JsonDocument doc;
   DeserializationError err = deserializeJson(doc, http.getStream());
   http.end();
@@ -582,6 +595,15 @@ bool fetchUsage() {
   lastFetchMs   = millis();
   lastSuccessMs = millis();
   haveData      = true;
+
+  // Detect whether anything actually changed
+  uint32_t newHash = computeDataHash();
+  if (newHash != lastDataHash) {
+    lastDataHash = newHash;
+    // Trigger bar animations for new data
+    // (already handled per-field above)
+  }
+
   checkWaveTrigger();
   rebuildPageList();
   return true;
@@ -592,21 +614,16 @@ void rebuildPageList() {
   activePagesN = 0;
   activePages[activePagesN++] = { PAGE_SESSION, "SESSION" };
   activePages[activePagesN++] = { PAGE_WEEK,    "WEEK" };
-  if (modelsN > 0)    activePages[activePagesN++] = { PAGE_MODELS, "MODELS" };
-                       activePages[activePagesN++] = { PAGE_TREND,  "TREND" };
-  if (extraEnabled)    activePages[activePagesN++] = { PAGE_EXTRA,  "EXTRA" };
+  if (modelsN > 0)   activePages[activePagesN++] = { PAGE_MODELS, "MODELS" };
+                     activePages[activePagesN++] = { PAGE_TREND,  "TREND" };
+  if (extraEnabled)  activePages[activePagesN++] = { PAGE_EXTRA,  "EXTRA" };
 
-  // Keep the user on the same page if it still exists, else clamp to first.
   int newCur = -1;
   for (int i = 0; i < activePagesN; i++) {
     if ((int)activePages[i].id == prevCurId) { newCur = i; break; }
   }
   currentPageIdx = (newCur >= 0) ? newCur : 0;
 
-  // A page transition may be in flight. Its cached from/to indices refer to
-  // the OLD list; if the list just shrank (models/extra appeared or vanished)
-  // those indices can now point past activePagesN and crash renderTransition.
-  // Cancel the transition and land cleanly on the resolved current page.
   if (inTransition &&
       (fromPageIdx >= activePagesN || toPageIdx >= activePagesN)) {
     inTransition = false;
@@ -627,15 +644,17 @@ void renderSession(int xo) {
     return;
   }
 
-  drawBigPct(xo + 64, 42, sesPct);
+  // Big number centred, no face
+  drawBigPct(xo + 64, 44, sesPct);
 
   currentBarVal(dispSesBarPct, sesBarFrom, sesBarTo, sesBarAnimStart);
-  drawBar(xo + 4, 46, 120, 6, dispSesBarPct, sesPct >= 90);
+  drawBar(xo + 4, 48, 120, 7, dispSesBarPct, sesPct >= 90);
 
-  // Mood face — or wave celebration if recently crossed 90
+  // Wave celebration still works — just the hand/head, no body on this page
   bool waving = (waveStartMs > 0) && (millis() - waveStartMs < WAVE_DURATION);
-  if (waving) drawClaudeWavingHead(xo + 50, 55, 2);
-  else        drawClaudeFace(xo + 50, 54, 2, moodFromPct(sesPct));
+  if (waving) {
+    drawClaudeWavingHead(xo + 50, 55, 2);
+  }
 }
 
 void renderWeek(int xo) {
@@ -647,18 +666,18 @@ void renderWeek(int xo) {
     return;
   }
 
-  drawBigPct(xo + 64, 42, wkPct);
+  drawBigPct(xo + 64, 44, wkPct);
 
   currentBarVal(dispWkBarPct, wkBarFrom, wkBarTo, wkBarAnimStart);
-  drawBar(xo + 4, 46, 120, 6, dispWkBarPct, wkPct >= 90);
+  drawBar(xo + 4, 48, 120, 7, dispWkBarPct, wkPct >= 90);
 
+  // Projected end value — small text bottom-left, no face
   if (wkProjected >= 0) {
-    char buf[12];
-    snprintf(buf, sizeof(buf), "end~%d", wkProjected);
+    char buf[14];
+    snprintf(buf, sizeof(buf), "end~%d%%", wkProjected);
     u8g2.setFont(u8g2_font_5x7_tf);
     u8g2.drawStr(xo + 0, 62, buf);
   }
-  drawClaudeFace(xo + 50, 54, 2, moodFromPct(wkPct));
 }
 
 void renderModels(int xo) {
@@ -694,32 +713,40 @@ void renderModels(int xo) {
   }
 
   if (modelsN > 4) {
+    u8g2.setFont(u8g2_font_5x7_tf);
     u8g2.drawStr(xo + 0, 63, "...");
   }
 }
 
+// TREND page — FIXED: bars start at x=18 so label "5h"/"7d" and value
+// on the right never overlap the bar area.
+// Layout:
+//   [0..17]  label ("5h" or "7d") left-aligned
+//   [18..109] bars (92px wide)
+//   [110..127] current value right-aligned
 void renderTrend(int xo) {
   drawHeader("TREND", "");
 
   u8g2.setFont(u8g2_font_5x7_tf);
 
-  // 5h row
-  u8g2.drawStr(xo + 0, 19, "5h");
+  // ── 5h row ──
+  u8g2.drawStr(xo + 0, 20, "5h");
+  drawTrendBars(xo + 18, 12, 92, 10, trend5h, trend5hN);
   char val[8];
-  if (sesPct < 0) snprintf(val, sizeof(val), "--"); else snprintf(val, sizeof(val), "%d", sesPct);
+  if (sesPct < 0) snprintf(val, sizeof(val), "--");
+  else            snprintf(val, sizeof(val), "%d%%", sesPct);
   int vw = u8g2.getStrWidth(val);
-  u8g2.drawStr(xo + 128 - vw, 19, val);
-  drawTrendBars(xo + 14, 13, 108, 10, trend5h, trend5hN);
+  u8g2.drawStr(xo + 127 - vw, 20, val);
 
-  // 7d row
-  u8g2.drawStr(xo + 0, 39, "7d");
-  if (wkPct < 0) snprintf(val, sizeof(val), "--"); else snprintf(val, sizeof(val), "%d", wkPct);
+  // ── 7d row ──
+  u8g2.drawStr(xo + 0, 41, "7d");
+  drawTrendBars(xo + 18, 33, 92, 10, trend7d, trend7dN);
+  if (wkPct < 0) snprintf(val, sizeof(val), "--");
+  else           snprintf(val, sizeof(val), "%d%%", wkPct);
   vw = u8g2.getStrWidth(val);
-  u8g2.drawStr(xo + 128 - vw, 39, val);
-  drawTrendBars(xo + 14, 33, 108, 10, trend7d, trend7dN);
+  u8g2.drawStr(xo + 127 - vw, 41, val);
 
-  // Mood pip bottom-right
-  if (sesPct >= 0) drawClaudeFace(xo + 50, 54, 2, moodFromPct(sesPct));
+  // No Claude face at bottom of TREND page (removed per request)
 }
 
 void renderExtra(int xo) {
@@ -731,8 +758,8 @@ void renderExtra(int xo) {
     return;
   }
 
-  drawBigPct(xo + 64, 42, extraPct);
-  drawBar(xo + 4, 46, 120, 6, (float)extraPct, extraPct >= 90);
+  drawBigPct(xo + 64, 44, extraPct);
+  drawBar(xo + 4, 48, 120, 7, (float)extraPct, extraPct >= 90);
 
   char buf[24];
   if (extraLimit > 0.5f) {
@@ -742,8 +769,7 @@ void renderExtra(int xo) {
   }
   u8g2.setFont(u8g2_font_5x7_tf);
   u8g2.drawStr(xo + 0, 62, buf);
-
-  drawClaudeFace(xo + 88, 54, 2, moodFromPct(extraPct));
+  // No Claude face (removed per request)
 }
 
 void renderPage(PageId p, int xo) {
@@ -757,7 +783,7 @@ void renderPage(PageId p, int xo) {
 }
 
 // ============================================================
-// Boot / error screen — Claude assembling + glyph status row.
+// Boot / connecting screen
 // statusGlyph: 0=just assembling, 1=wifi pending, 2=server pending, 3=ok, -1=err
 // ============================================================
 void renderBoot(int statusGlyph) {
@@ -780,23 +806,27 @@ void renderBoot(int statusGlyph) {
   int cx    = (128 - cw) / 2;
   int cy    = 9;
 
-  int breath = 0;
-  int eyeShift = 0;
-  bool blink = false;
-  if (!assembling) {
-    breath = (int)(sinf((millis() % 2400) / 2400.0f * 2.0f * 3.14159f) * 1.5f);
-    eyeShift = (int)(sinf((millis() % 4000) / 4000.0f * 2.0f * 3.14159f) * 1.4f);
-    blink = (millis() % 3500) < 130;
-  }
+  // Smooth breathing using easeInOutCubic on a sine wave
+  float breathPhase = (float)(millis() % 2600) / 2600.0f;
+  float breathSine  = sinf(breathPhase * 2.0f * 3.14159f);
+  int   breath      = assembling ? 0 : (int)(breathSine * 1.2f);
+
+  // Eye look-around: cubic-eased sweep
+  float eyePhase = (float)(millis() % 4200) / 4200.0f;
+  float eyeSine  = sinf(eyePhase * 2.0f * 3.14159f);
+  int   eyeShift = assembling ? 0 : (int)(eyeSine * 1.3f);
+
+  bool blink = !assembling && (millis() % 3800 < 140);
 
   drawClaudeAssembling(cx, cy + breath, scale, stage);
 
-  // After assembly, override eyes with animation (blink + look around).
   if (!assembling && stage >= 4) {
+    // Clear default eyes, re-draw with look/blink
     u8g2.setDrawColor(0);
     u8g2.drawBox(cx + 3*scale,  cy + breath + 1*scale, 2*scale, 3*scale);
     u8g2.drawBox(cx + 11*scale, cy + breath + 1*scale, 2*scale, 3*scale);
     u8g2.setDrawColor(1);
+
     if (blink) {
       u8g2.setDrawColor(0);
       u8g2.drawBox(cx + 3*scale,  cy + breath + 2*scale, 2*scale, scale);
@@ -810,8 +840,13 @@ void renderBoot(int statusGlyph) {
     }
   }
 
-  // Status glyph row — 3 dots: wifi, server, data.
-  // No text leaks (SSID/URL/IP never appear).
+  // ── Tiny status text top-left (5x7) — shows what we're doing ──
+  if (!assembling) {
+    u8g2.setFont(u8g2_font_4x6_tf);
+    u8g2.drawStr(0, 6, bootStatusText);
+  }
+
+  // ── Status glyph row — 3 dots: wifi, server, data ──
   if (!assembling) {
     int gy = 60;
     int gxs[3] = { 56, 64, 72 };
@@ -821,11 +856,15 @@ void renderBoot(int statusGlyph) {
     else if (statusGlyph == 2)  { states[0] =  1; states[1] = 0; }
     else if (statusGlyph == 3)  { states[0] =  1; states[1] = 1; states[2] = 1; }
 
-    bool pulseOn = (millis() / 380) % 2;
+    // Use smooth pulse — sine-based instead of hard blink
+    float pulseSine = sinf((float)(millis() % 800) / 800.0f * 2.0f * 3.14159f);
+    bool  pulseOn   = pulseSine > 0.0f;
+
     for (int i = 0; i < 3; i++) {
       int gx = gxs[i];
-      if      (states[i] ==  1) u8g2.drawDisc(gx, gy, 1);
-      else if (states[i] == -1) {
+      if (states[i] == 1) {
+        u8g2.drawDisc(gx, gy, 1);
+      } else if (states[i] == -1) {
         u8g2.drawLine(gx-1, gy-1, gx+1, gy+1);
         u8g2.drawLine(gx-1, gy+1, gx+1, gy-1);
       } else {
@@ -835,53 +874,57 @@ void renderBoot(int statusGlyph) {
     }
   }
 
-  // Idle wander overlay
-  if (wanderActive) {
-    unsigned long el  = millis() - wanderStartMs;
-    unsigned long dur = 4500;
-    if (el >= dur) {
-      wanderActive = false;
-      lastWanderMs = millis();
-    } else {
-      float t = (float)el / dur;
-      int wX  = (int)(-20 + t * 168);
-      ClaudeFrame f = ((millis() / 130) % 2) ? FRAME_WALK_A : FRAME_WALK_B;
-      drawClaude(wX, 50, 1, f, 1);
+  // ── Idle wander overlay (shown when stuck waiting, not during assembly) ──
+  if (!assembling) {
+    if (wanderActive) {
+      unsigned long el  = millis() - wanderStartMs;
+      unsigned long dur = 4500;
+      if (el >= dur) {
+        wanderActive = false;
+        lastWanderMs = millis();
+      } else {
+        float t = easeInOutCubic(clamp01((float)el / dur));
+        int wX  = (int)(-20 + t * 168);
+        ClaudeFrame f = ((millis() / 140) % 2) ? FRAME_WALK_A : FRAME_WALK_B;
+        drawClaude(wX, 50, 1, f, 1);
+      }
+    } else if (millis() - lastWanderMs > WANDER_GAP_MS) {
+      wanderActive  = true;
+      wanderStartMs = millis();
     }
-  } else if (!assembling && millis() - lastWanderMs > WANDER_GAP_MS) {
-    wanderActive  = true;
-    wanderStartMs = millis();
   }
 
   u8g2.sendBuffer();
 }
 
 // ============================================================
-// Page transition — small Claude (scale 1), snappy 1.5s
+// Page transition — small Claude (scale 1), 1.5s
 // ============================================================
 void renderTransition() {
   unsigned long elapsed = millis() - transitionStartMs;
-  float t = (float)elapsed / TRANSITION_MS;
-  if (t > 1.0f) t = 1.0f;
+  float t = clamp01((float)elapsed / TRANSITION_MS);
 
-  PageId fromP        = activePages[fromPageIdx].id;
-  PageId toP          = activePages[toPageIdx].id;
-  const char* toName  = activePages[toPageIdx].name;
+  PageId fromP       = activePages[fromPageIdx].id;
+  PageId toP         = activePages[toPageIdx].id;
+  const char* toName = activePages[toPageIdx].name;
 
   if (t < 0.13f) {
-    float p = t / 0.13f;
-    int xo = (int)(-128.0f * easeInCubic(p));
+    float p = easeInCubic(t / 0.13f);
+    int xo = (int)(-128.0f * p);
+    u8g2.clearBuffer();
     renderPage(fromP, xo);
   } else if (t < 0.40f) {
     float p = (t - 0.13f) / 0.27f;
     float e = easeInOutCubic(p);
+    u8g2.clearBuffer();
     int cX  = (int)(140 - e * 84);
-    ClaudeFrame f = ((millis() / 120) % 2) ? FRAME_WALK_A : FRAME_WALK_B;
+    ClaudeFrame f = ((millis() / 130) % 2) ? FRAME_WALK_A : FRAME_WALK_B;
     drawClaude(cX, 26, 1, f, -1);
   } else if (t < 0.62f) {
-    int   cX     = 56;
-    float subp   = (t - 0.40f) / 0.22f;
-    int   bounce = (int)(sinf(subp * 3.14159f) * -1.5f);
+    u8g2.clearBuffer();
+    int   cX   = 56;
+    float subp = (t - 0.40f) / 0.22f;
+    int bounce = (int)(sinf(subp * 3.14159f) * -1.5f);
     ClaudeFrame f = FRAME_STAND;
     if (subp > 0.45f && subp < 0.55f) f = FRAME_BLINK;
     drawClaude(cX, 26 + bounce, 1, f, 0);
@@ -889,14 +932,16 @@ void renderTransition() {
   } else if (t < 0.80f) {
     float p = (t - 0.62f) / 0.18f;
     float e = easeInOutCubic(p);
+    u8g2.clearBuffer();
     int cX  = (int)(56 - e * 84);
-    ClaudeFrame f = ((millis() / 120) % 2) ? FRAME_WALK_A : FRAME_WALK_B;
+    ClaudeFrame f = ((millis() / 130) % 2) ? FRAME_WALK_A : FRAME_WALK_B;
     drawClaude(cX, 26, 1, f, -1);
-    float bub = 1.0f - p;
+    float bub = clamp01(1.0f - easeInCubic(p));
     if (bub > 0.05f) drawSpeechBubble(cX + 8, 9, toName, bub);
   } else {
-    float p = (t - 0.80f) / 0.20f;
-    int xo  = (int)(128.0f * (1.0f - easeOutCubic(p)));
+    float p = easeOutBack(clamp01((t - 0.80f) / 0.20f));
+    int xo  = (int)(128.0f * (1.0f - p));
+    u8g2.clearBuffer();
     renderPage(toP, xo);
   }
 }
@@ -909,10 +954,10 @@ void render() {
 
   if (!haveData || stale) {
     int glyph = -1;
-    if (WiFi.status() != WL_CONNECTED) glyph = 1;
+    if (WiFi.status() != WL_CONNECTED)                                   glyph = 1;
     else if (lastError.indexOf("token") >= 0 || lastError.indexOf("401") >= 0) glyph = -1;
-    else if (lastError.length() > 0)   glyph = -1;
-    else                                glyph = 2;
+    else if (lastError.length() > 0)                                     glyph = -1;
+    else                                                                  glyph = 2;
     renderBoot(glyph);
     return;
   }
@@ -933,6 +978,7 @@ void render() {
     inTransition   = false;
     currentPageIdx = toPageIdx;
     pageStartMs    = millis();
+    u8g2.clearBuffer();
     renderPage(activePages[currentPageIdx].id, 0);
     drawPageDots();
     drawConnStatus();
@@ -963,17 +1009,29 @@ void maybeStartTransition() {
 // Setup with animated boot
 // ============================================================
 void connectWiFiAnimated() {
+  snprintf(bootStatusText, sizeof(bootStatusText), "WiFi...");
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   unsigned long t0 = millis();
   unsigned long lastFrame = 0;
+  int dot = 0;
   while (WiFi.status() != WL_CONNECTED && millis() - t0 < 30000) {
-    if (millis() - lastFrame >= 30) {
+    if (millis() - lastFrame >= 28) {
       lastFrame = millis();
+      // Animated dots so there's visible activity
+      dot = (dot + 1) % 4;
+      char buf[24];
+      snprintf(buf, sizeof(buf), "WiFi%.*s", dot, "...");
+      strncpy(bootStatusText, buf, sizeof(bootStatusText)-1);
       renderBoot(1);
     }
     delay(5);
     yield();
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    snprintf(bootStatusText, sizeof(bootStatusText), "WiFi ok");
+  } else {
+    snprintf(bootStatusText, sizeof(bootStatusText), "WiFi fail");
   }
 }
 
@@ -985,11 +1043,11 @@ void setup() {
 
   bootEntryMs = millis();
 
-  // Phase 1: assembly + breath, totally minimalist (no text)
+  // Phase 1: assembly + breath (no text during assembly)
   unsigned long t0 = millis();
   while (millis() - t0 < 1800) {
     renderBoot(0);
-    delay(30);
+    delay(28);
     yield();
   }
 
@@ -997,12 +1055,23 @@ void setup() {
   connectWiFiAnimated();
 
   // Phase 3: first server contact
+  snprintf(bootStatusText, sizeof(bootStatusText), "Fetching...");
   unsigned long t1 = millis();
   while (!haveData && millis() - t1 < 15000) {
     renderBoot(2);
-    fetchUsage();
-    if (!haveData) delay(800);
+    if (fetchUsage()) {
+      snprintf(bootStatusText, sizeof(bootStatusText), "Ready!");
+      renderBoot(3);
+      delay(400);
+    } else {
+      snprintf(bootStatusText, sizeof(bootStatusText), "Retrying...");
+      delay(700);
+    }
     yield();
+  }
+
+  if (!haveData) {
+    snprintf(bootStatusText, sizeof(bootStatusText), "No data");
   }
 
   if (activePagesN == 0) {
@@ -1014,6 +1083,7 @@ void setup() {
 
   pageStartMs = millis();
   lastPoll    = millis();
+  lastServerCheck = millis();
 }
 
 // ============================================================
@@ -1022,24 +1092,39 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // WiFi auto-reconnect
+  // ── WiFi auto-reconnect with exponential backoff ──────────────────────────
   if (WiFi.status() != WL_CONNECTED) {
     if (wifiLostMs == 0) wifiLostMs = now;
-    if (now - wifiLostMs > 5000) {
+    if (now - wifiLostMs > wifiBackoff) {
       WiFi.disconnect();
       WiFi.begin(WIFI_SSID, WIFI_PASS);
-      wifiLostMs = now;
+      wifiLostMs  = now;
+      wifiBackoff = min(wifiBackoff * 2, WIFI_BACKOFF_CAP);
     }
   } else {
+    if (wifiLostMs != 0) {
+      // Just reconnected — reset backoff
+      wifiBackoff = 5000;
+    }
     wifiLostMs = 0;
   }
 
+  // ── Lightweight server-alive ping every SERVER_CHECK_MS ───────────────────
+  if (WiFi.status() == WL_CONNECTED && now - lastServerCheck >= SERVER_CHECK_MS) {
+    lastServerCheck = now;
+    // Only do a cheap ping if it's not time for a full fetch yet
+    if (now - lastPoll < POLL_MS - 2000) {
+      pingServer();
+    }
+  }
+
+  // ── Full data fetch every POLL_MS ─────────────────────────────────────────
   if (now - lastPoll >= POLL_MS) {
     lastPoll = now;
     fetchUsage();
   }
 
-  // Tick down reset counters once per second
+  // ── Tick down reset counters once per second ──────────────────────────────
   static unsigned long lastSecTick = 0;
   if (haveData && now - lastSecTick >= 1000) {
     lastSecTick = now;
@@ -1053,10 +1138,13 @@ void loop() {
 
   maybeStartTransition();
 
+  // ── Adaptive render rate ──────────────────────────────────────────────────
   static unsigned long lastRenderMs = 0;
-  bool needFast = inTransition || !haveData
-                  || (lastSuccessMs > 0 && now - lastSuccessMs < FRESH_PULSE_MS)
-                  || (waveStartMs   > 0 && now - waveStartMs   < WAVE_DURATION);
+  bool needFast = inTransition
+                || !haveData
+                || wanderActive
+                || (lastSuccessMs > 0 && now - lastSuccessMs < FRESH_PULSE_MS)
+                || (waveStartMs   > 0 && now - waveStartMs   < WAVE_DURATION);
   unsigned long interval = needFast ? RENDER_FAST_MS : RENDER_SLOW_MS;
   if (now - lastRenderMs >= interval) {
     lastRenderMs = now;
