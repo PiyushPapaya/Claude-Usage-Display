@@ -15,8 +15,20 @@
 #include <math.h>
 
 #include "secrets.h"
-#ifndef WIFI_SSID
-  #error "secrets.h missing or incomplete. Copy secrets.h.example to secrets.h and fill in."
+
+// Optional captive-portal WiFi setup. Define USE_WIFI_MANAGER in secrets.h to
+// skip hardcoded credentials: on first boot (or when the saved network is
+// gone) the ESP hosts a "ClaudeUsage" AP where you pick your WiFi in a browser.
+// Requires the "WiFiManager" library (tzapu). SERVER_URL is still needed.
+#ifdef USE_WIFI_MANAGER
+  #include <WiFiManager.h>
+#endif
+
+#if !defined(WIFI_SSID) && !defined(USE_WIFI_MANAGER)
+  #error "secrets.h missing or incomplete. Copy secrets.h.example to secrets.h and fill in (or define USE_WIFI_MANAGER)."
+#endif
+#ifndef SERVER_URL
+  #error "SERVER_URL not set in secrets.h."
 #endif
 
 // Forward-declared so Arduino's auto-generated prototypes know these types.
@@ -986,6 +998,18 @@ void maybeStartTransition() {
 // ============================================================
 // Setup with animated boot
 // ============================================================
+#ifdef USE_WIFI_MANAGER
+// Captive-portal connect. Blocks in the portal until configured or timeout;
+// the animated connect below is used for the hardcoded-credentials path.
+void connectWiFiPortal() {
+  snprintf(bootStatusText, sizeof(bootStatusText), "WiFi setup...");
+  renderBoot(1);
+  WiFiManager wm;
+  wm.setConfigPortalTimeout(180);   // give up the portal after 3 min
+  bool ok = wm.autoConnect("ClaudeUsage");
+  snprintf(bootStatusText, sizeof(bootStatusText), ok ? "WiFi ok" : "WiFi fail");
+}
+#else
 void connectWiFiAnimated() {
   snprintf(bootStatusText, sizeof(bootStatusText), "WiFi...");
   WiFi.mode(WIFI_STA);
@@ -1012,6 +1036,7 @@ void connectWiFiAnimated() {
     snprintf(bootStatusText, sizeof(bootStatusText), "WiFi fail");
   }
 }
+#endif  // USE_WIFI_MANAGER
 
 void setup() {
   Serial.begin(115200);
@@ -1029,7 +1054,11 @@ void setup() {
     yield();
   }
 
+#ifdef USE_WIFI_MANAGER
+  connectWiFiPortal();
+#else
   connectWiFiAnimated();
+#endif
 
   // First contact with the server — keep retrying for a while.
   snprintf(bootStatusText, sizeof(bootStatusText), "Fetching...");
@@ -1075,7 +1104,11 @@ void loop() {
     if (wifiLostMs == 0) wifiLostMs = now;
     if (now - wifiLostMs > wifiBackoff) {
       WiFi.disconnect();
+#ifdef USE_WIFI_MANAGER
+      WiFi.begin();                    // reconnect using portal-saved creds
+#else
       WiFi.begin(WIFI_SSID, WIFI_PASS);
+#endif
       wifiLostMs  = now;
       wifiBackoff = min(wifiBackoff * 2, WIFI_BACKOFF_CAP);
     }

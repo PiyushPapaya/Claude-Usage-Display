@@ -65,6 +65,7 @@ Arduino libraries:
 - ESP8266 core (via Boards Manager)
 - ArduinoJson
 - U8g2
+- WiFiManager (tzapu) — *optional*, only if you enable captive-portal setup
 
 Before compiling, create a `secrets.h` next to the `.ino` — copy the example and fill it in:
 
@@ -79,6 +80,8 @@ cp claude_usage_display/secrets.h.example claude_usage_display/secrets.h
 ```
 
 `SERVER_URL` is the LAN IP of the machine running `server.py` — not `localhost`, since the ESP is a different device. `secrets.h` is gitignored. Then flash to the ESP8266 from the Arduino IDE as usual.
+
+Prefer not to hardcode WiFi? Add `#define USE_WIFI_MANAGER` to `secrets.h` (and install the WiFiManager library). On first boot the ESP hosts a **ClaudeUsage** hotspot — connect from your phone and pick your network in the browser. Credentials are saved to flash; `SERVER_URL` is still required.
 
 ## What ends up on the display
 
