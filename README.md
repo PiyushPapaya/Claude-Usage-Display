@@ -81,6 +81,8 @@ cp claude_usage_display/secrets.h.example claude_usage_display/secrets.h
 
 `SERVER_URL` is the LAN IP of the machine running `server.py` — not `localhost`, since the ESP is a different device. `secrets.h` is gitignored. Then flash to the ESP8266 from the Arduino IDE as usual.
 
+The display can be dimmed with `#define OLED_CONTRAST 0..255` in `secrets.h` (default 160) — handy for an always-on desk display.
+
 Prefer not to hardcode WiFi? Add `#define USE_WIFI_MANAGER` to `secrets.h` (and install the WiFiManager library). On first boot the ESP hosts a **ClaudeUsage** hotspot — connect from your phone and pick your network in the browser. Credentials are saved to flash; `SERVER_URL` is still required.
 
 ## What ends up on the display
@@ -118,7 +120,7 @@ pytest
 
 ## Notes
 
-On Windows use `start.bat`/`stop.bat`. On Linux/macOS use `./run.sh` (foreground), or install the systemd unit in [`docs/claude-usage.service`](docs/claude-usage.service) for an always-on background service. The server itself (`server.py`) is platform-independent.
+On Windows use `start.bat`/`stop.bat`. On Linux/macOS use `./run.sh` (foreground), or install the systemd unit in [`docs/claude-usage.service`](docs/claude-usage.service) for an always-on background service. There's also a [`Dockerfile`](Dockerfile) (mount `~/.claude` in for the token). The server itself (`server.py`) is platform-independent.
 
 The usage endpoint isn't officially documented; it's the same one Claude Desktop and Claude Code use for `/usage`. So if Anthropic changes the format, the display can break until `server.py` is updated. Weekday labels in reset times default to English; set `DISPLAY_LOCALE=de` for German (`Mo`, `Di`, …) or `WEEKDAY_LABELS` for anything else.
 

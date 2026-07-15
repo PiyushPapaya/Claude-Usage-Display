@@ -1,0 +1,14 @@
+.git
+.github
+__pycache__
+*.pyc
+tests
+claude_usage_display
+docs
+*.bat
+*.md
+server.log*
+server.pid
+usage_history.json*
+.venv
+venv

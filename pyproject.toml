@@ -1,0 +1,30 @@
+[project]
+name = "claude-usage-server"
+version = "1.0.0"
+description = "Local server that serves Claude usage data to an ESP8266 OLED display and a web dashboard."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "flask>=3.0,<4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "ruff",
+]
+
+[project.urls]
+Homepage = "https://github.com/PiyushPapaya/Claude-Usage-Display"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# The server deliberately uses aligned one-liner guards (`if x: return y`) for
+# compact, table-like readability. E701 flags those; the rest of the defaults run.
+ignore = ["E701"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

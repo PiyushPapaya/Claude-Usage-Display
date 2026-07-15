@@ -73,6 +73,12 @@ static const unsigned long WIFI_BACKOFF_CAP = 60000;   // max reconnect wait
   #define OLED_SCL D1
 #endif
 
+// Display brightness, 0-255. OLEDs are bright at night; lower this for an
+// always-on desk display. Override in secrets.h.
+#ifndef OLED_CONTRAST
+  #define OLED_CONTRAST 160
+#endif
+
 #if defined(OLED_SSD1306)
   U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0);
 #else
@@ -1043,6 +1049,7 @@ void setup() {
   delay(100);
   Wire.begin(OLED_SDA, OLED_SCL);
   u8g2.begin();
+  u8g2.setContrast(OLED_CONTRAST);
 
   bootEntryMs = millis();
 
