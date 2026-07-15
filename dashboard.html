@@ -195,26 +195,55 @@ function spark(el, arr) {
 }
 
 // If the server requires a token, pass it as ?token=... in this page's URL
-// (e.g. http://host:8080/?token=abc). We forward it as a header on each fetch.
+// (e.g. http://host:8080/?token=abc). It is only ever sent as the
+// X-Usage-Token request header - never appended to the request URL - so it
+// stays out of logs, browser history and the Referer header.
 const params = new URLSearchParams(location.search);
 const AUTH_TOKEN = params.get("token");
+
+// Only permit the API base to point at this machine or a private LAN address -
+// the only places this usage server legitimately runs. This stops a crafted
+// ?api=... link from redirecting requests (and the token header) to an
+// attacker-controlled host on the public internet.
+function isPrivateHost(h) {
+  h = (h || "").toLowerCase();
+  if (h === "localhost" || h === "::1" || h.endsWith(".local")) return true;
+  const m = h.match(/^(\d+)\.(\d+)\.\d+\.\d+$/);
+  if (!m) return false;
+  const a = +m[1], b = +m[2];
+  return a === 127                                   // loopback
+      || a === 10                                    // 10.0.0.0/8
+      || (a === 192 && b === 168)                    // 192.168.0.0/16
+      || (a === 172 && b >= 16 && b <= 31);          // 172.16.0.0/12
+}
 
 // Where to reach the usage server. When this page is served by server.py the
 // origin already matches, so relative paths just work. But when the file is
 // opened directly (file://) or hosted elsewhere, "/usage" points nowhere and
 // the fetch fails ("unreachable"). In that case fall back to a base URL:
-//   - ?api=http://<host>:8080  explicit override (use for a remote server)
+//   - ?api=http://<host>:8080  explicit override (LAN/loopback hosts only)
 //   - otherwise default to http://localhost:8080 when opened as a file.
-const API_BASE = (
-  params.get("api") ||
-  (location.protocol === "file:" ? "http://localhost:8080" : "")
-).replace(/\/+$/, "");
+function resolveApiBase() {
+  const raw = params.get("api");
+  if (raw) {
+    try {
+      const u = new URL(raw);
+      if ((u.protocol === "http:" || u.protocol === "https:") && isPrivateHost(u.hostname)) {
+        return u.origin;
+      }
+      console.warn("Ignoring ?api= (not a private/loopback http(s) origin):", raw);
+    } catch (e) {
+      console.warn("Ignoring malformed ?api=:", raw);
+    }
+  }
+  return location.protocol === "file:" ? "http://localhost:8080" : "";
+}
+const API_BASE = resolveApiBase();
 
 async function tick(force) {
   try {
     const headers = AUTH_TOKEN ? { "X-Usage-Token": AUTH_TOKEN } : {};
-    const url = API_BASE + (force ? "/refresh" : "/usage")
-      + (AUTH_TOKEN ? "?token=" + encodeURIComponent(AUTH_TOKEN) : "");
+    const url = API_BASE + (force ? "/refresh" : "/usage");
     const r = await fetch(url, { cache: "no-store", headers });
     const d = await r.json();
     render(d);
