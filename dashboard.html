@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Claude Usage</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23d97757'/%3E%3Ctext x='16' y='23' font-size='20' text-anchor='middle' fill='white'%3E%E2%9C%B3%3C/text%3E%3C/svg%3E">
+<style>
+  :root {
+    --accent: #d97757;
+    --accent-soft: rgba(217, 119, 87, 0.14);
+    --ok: #4a9d6e;
+    --warn: #d9a441;
+    --hot: #d95757;
+    --bg: #faf9f7;
+    --panel: #ffffff;
+    --panel-2: #f3f0ec;
+    --border: #e7e2db;
+    --text: #26221e;
+    --muted: #8a8178;
+    --shadow: 0 1px 2px rgba(38,34,30,.04), 0 8px 24px rgba(38,34,30,.06);
+    --radius: 18px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #191714;
+      --panel: #221f1b;
+      --panel-2: #2b2723;
+      --border: #35302a;
+      --text: #efe9e1;
+      --muted: #9a9086;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:#191714; --panel:#221f1b; --panel-2:#2b2723; --border:#35302a;
+    --text:#efe9e1; --muted:#9a9086;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 10px 30px rgba(0,0,0,.35);
+  }
+  :root[data-theme="light"] {
+    --bg:#faf9f7; --panel:#fff; --panel-2:#f3f0ec; --border:#e7e2db;
+    --text:#26221e; --muted:#8a8178;
+    --shadow:0 1px 2px rgba(38,34,30,.04),0 8px 24px rgba(38,34,30,.06);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    padding: 28px 20px 56px;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  header {
+    display: flex; align-items: center; gap: 12px; margin-bottom: 22px;
+  }
+  .logo {
+    width: 34px; height: 34px; border-radius: 9px; flex: 0 0 auto;
+    background: var(--accent); display: grid; place-items: center;
+    color: #fff; font-weight: 700;
+  }
+  h1 { font-size: 19px; margin: 0; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 12.5px; margin-top: 1px; }
+  header .spacer { flex: 1; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); box-shadow: 0 0 0 4px transparent; transition: .3s; }
+  .dot.ok { background: var(--ok); box-shadow: 0 0 0 4px rgba(74,157,110,.16); }
+  .dot.err { background: var(--hot); box-shadow: 0 0 0 4px rgba(217,87,87,.16); }
+  .status-txt { font-size: 12.5px; color: var(--muted); }
+  .btn {
+    border: 1px solid var(--border); background: var(--panel); color: var(--text);
+    border-radius: 10px; padding: 7px 11px; font-size: 13px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 560px) { .grid { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 18px 18px 16px; box-shadow: var(--shadow);
+  }
+  .card.span { grid-column: 1 / -1; }
+  .card h2 {
+    font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--muted); margin: 0 0 12px; font-weight: 600;
+    display:flex; justify-content:space-between; align-items:center;
+  }
+  .card h2 .reset { letter-spacing: .02em; text-transform: none; font-weight: 500; }
+  .big { font-size: 46px; font-weight: 650; letter-spacing: -0.03em; line-height: 1; }
+  .big small { font-size: 20px; font-weight: 500; color: var(--muted); }
+  .row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  .pill {
+    font-size: 11.5px; padding: 3px 9px; border-radius: 999px;
+    background: var(--accent-soft); color: var(--accent); font-weight: 600;
+  }
+  .bar { height: 9px; border-radius: 999px; background: var(--panel-2); overflow: hidden; margin-top: 14px; }
+  .bar > span { display: block; height: 100%; border-radius: 999px; background: var(--accent);
+    transition: width .6s cubic-bezier(.22,1,.36,1); }
+  .meta { color: var(--muted); font-size: 12.5px; margin-top: 10px; }
+  .models { display: flex; flex-direction: column; gap: 12px; }
+  .m-row { display: grid; grid-template-columns: 78px 1fr 40px; align-items: center; gap: 10px; }
+  .m-row .name { font-size: 13px; font-weight: 500; }
+  .m-row .val { text-align: right; font-variant-numeric: tabular-nums; font-size: 13px; color: var(--muted); }
+  .m-row .bar { margin: 0; }
+  .spark { display: flex; align-items: flex-end; gap: 2px; height: 46px; margin-top: 4px; }
+  .spark i { flex: 1; background: var(--accent); border-radius: 2px 2px 0 0; min-height: 2px; opacity: .85; }
+  .spark i:last-child { background: var(--accent); opacity: 1; box-shadow: 0 0 0 1px var(--panel); }
+  .trend-lbl { display:flex; justify-content:space-between; font-size:12px; color:var(--muted); margin-bottom:2px;}
+  .empty { color: var(--muted); font-size: 13px; padding: 8px 0; }
+  footer { text-align: center; color: var(--muted); font-size: 11.5px; margin-top: 30px; }
+  footer a { color: var(--muted); }
+  .hot > span { background: var(--hot) !important; }
+  .warn > span { background: var(--warn) !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">✳</div>
+    <div>
+      <h1>Claude Usage</h1>
+      <div class="sub" id="updated">connecting…</div>
+    </div>
+    <div class="spacer"></div>
+    <span class="dot" id="dot"></span>
+    <span class="status-txt" id="status">—</span>
+    <button class="btn" id="theme" title="Toggle theme">◐</button>
+    <button class="btn" id="refresh">↻ Refresh</button>
+  </header>
+
+  <div class="grid" id="grid">
+    <div class="card"><h2>Session · 5h <span class="reset" id="ses-reset"></span></h2>
+      <div class="row"><div class="big" id="ses-pct">--<small>%</small></div><span class="pill" id="ses-status">—</span></div>
+      <div class="bar" id="ses-bar"><span style="width:0"></span></div>
+      <div class="meta" id="ses-meta"></div>
+    </div>
+    <div class="card"><h2>Week · 7d <span class="reset" id="wk-reset"></span></h2>
+      <div class="row"><div class="big" id="wk-pct">--<small>%</small></div><span class="pill" id="wk-status">—</span></div>
+      <div class="bar" id="wk-bar"><span style="width:0"></span></div>
+      <div class="meta" id="wk-meta"></div>
+    </div>
+    <div class="card span" id="models-card"><h2>Models</h2>
+      <div class="models" id="models"><div class="empty">No per-model data.</div></div>
+    </div>
+    <div class="card"><h2>Trend · 5h</h2>
+      <div class="trend-lbl"><span>oldest</span><span id="t5-now">--%</span></div>
+      <div class="spark" id="spark5"></div>
+    </div>
+    <div class="card"><h2>Trend · 7d</h2>
+      <div class="trend-lbl"><span>oldest</span><span id="t7-now">--%</span></div>
+      <div class="spark" id="spark7"></div>
+    </div>
+    <div class="card span" id="extra-card" style="display:none"><h2>Extra usage <span class="reset" id="ex-reset"></span></h2>
+      <div class="row"><div class="big" id="ex-pct">--<small>%</small></div><span class="pill" id="ex-amt"></span></div>
+      <div class="bar" id="ex-bar"><span style="width:0"></span></div>
+    </div>
+  </div>
+
+  <footer>Polls <code>/usage</code> · same data the OLED shows · <span id="tok"></span></footer>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+// Theme toggle: auto -> light -> dark, persisted.
+const root = document.documentElement;
+const saved = localStorage.getItem("theme");
+if (saved) root.setAttribute("data-theme", saved);
+$("theme").onclick = () => {
+  const order = ["auto", "light", "dark"];
+  const cur = root.getAttribute("data-theme") || "auto";
+  const next = order[(order.indexOf(cur) + 1) % order.length];
+  root.setAttribute("data-theme", next);
+  localStorage.setItem("theme", next);
+};
+
+function toneClass(pct) { return pct >= 90 ? "hot" : pct >= 75 ? "warn" : ""; }
+function fmtPct(el, pct) {
+  el.innerHTML = (pct < 0 ? "--" : pct) + "<small>%</small>";
+}
+function setBar(barEl, pct) {
+  barEl.className = "bar " + toneClass(pct);
+  barEl.firstElementChild.style.width = Math.max(0, Math.min(100, pct < 0 ? 0 : pct)) + "%";
+}
+function spark(el, arr) {
+  el.innerHTML = "";
+  if (!arr || !arr.length) { el.innerHTML = '<div class="empty">No samples yet.</div>'; return; }
+  const tail = arr.slice(-48);
+  for (const v of tail) {
+    const b = document.createElement("i");
+    b.style.height = Math.max(2, Math.min(100, v)) + "%";
+    el.appendChild(b);
+  }
+}
+
+async function tick(force) {
+  try {
+    const r = await fetch(force ? "/refresh" : "/usage", { cache: "no-store" });
+    const d = await r.json();
+    render(d);
+  } catch (e) {
+    $("dot").className = "dot err";
+    $("status").textContent = "unreachable";
+  }
+}
+
+function render(d) {
+  if (!d || !d.ok) {
+    $("dot").className = "dot err";
+    $("status").textContent = (d && d.error) || "error";
+    return;
+  }
+  $("dot").className = "dot ok";
+  $("status").textContent = "live";
+  $("updated").textContent = "updated " + new Date().toLocaleTimeString();
+
+  const s = d.session || {};
+  fmtPct($("ses-pct"), s.pct); $("ses-status").textContent = s.status || "—";
+  setBar($("ses-bar"), s.pct);
+  $("ses-reset").textContent = s.reset_rel ? "resets in " + s.reset_rel : (s.active ? "" : "idle");
+  $("ses-meta").textContent = s.reset_abs ? "at " + s.reset_abs : "";
+
+  const w = d.weekly || {};
+  fmtPct($("wk-pct"), w.pct); $("wk-status").textContent = w.status || "—";
+  setBar($("wk-bar"), w.pct);
+  $("wk-reset").textContent = w.reset_rel ? "resets in " + w.reset_rel : "";
+  $("wk-meta").textContent = (w.projected_pct >= 0 ? "projected end ~" + w.projected_pct + "%" : "")
+    + (w.reset_abs ? "  ·  " + w.reset_abs : "");
+
+  const mc = $("models");
+  const ms = d.models || [];
+  if (!ms.length) { mc.innerHTML = '<div class="empty">No per-model data.</div>'; }
+  else {
+    mc.innerHTML = "";
+    for (const m of ms) {
+      const row = document.createElement("div"); row.className = "m-row";
+      const pct = m.pct < 0 ? 0 : m.pct;
+      row.innerHTML = `<div class="name">${m.label}</div>
+        <div class="bar ${toneClass(m.pct)}"><span style="width:${Math.min(100,pct)}%"></span></div>
+        <div class="val">${m.pct < 0 ? "--" : m.pct + "%"}</div>`;
+      mc.appendChild(row);
+    }
+  }
+
+  spark($("spark5"), d.trend_5h); spark($("spark7"), d.trend_7d);
+  $("t5-now").textContent = (s.pct < 0 ? "--" : s.pct) + "%";
+  $("t7-now").textContent = (w.pct < 0 ? "--" : w.pct) + "%";
+
+  const ex = d.extra || {};
+  if (ex.enabled) {
+    $("extra-card").style.display = "";
+    fmtPct($("ex-pct"), ex.pct); setBar($("ex-bar"), ex.pct);
+    $("ex-reset").textContent = ex.reset_rel ? "resets in " + ex.reset_rel : "";
+    const amt = ex.limit > 0.5 ? `${ex.used.toFixed(2)} / ${ex.limit.toFixed(0)} ${ex.currency}`
+                               : `${ex.used.toFixed(2)} ${ex.currency}`;
+    $("ex-amt").textContent = amt;
+  } else { $("extra-card").style.display = "none"; }
+
+  if (d.token_expires_in_sec != null) {
+    const m = Math.floor(d.token_expires_in_sec / 60);
+    $("tok").textContent = "token expires in " + (m > 60 ? Math.floor(m/60)+"h" : m+"m");
+  }
+}
+
+$("refresh").onclick = () => tick(true);
+tick(false);
+setInterval(() => tick(false), 15000);
+</script>
+</body>
+</html>

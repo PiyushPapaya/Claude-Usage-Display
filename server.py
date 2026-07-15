@@ -21,16 +21,30 @@ from collections import deque
 import urllib.request
 import urllib.error
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request, Response
 
 # ===================== Config =====================
-CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
+# Most settings can be overridden with environment variables so you don't have
+# to edit this file. See the README "Configuration" table for the full list.
+def _env(name: str, default: str) -> str:
+    return os.environ.get(name, default)
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+_default_creds = Path.home() / ".claude" / ".credentials.json"
+CREDENTIALS_PATH = Path(_env("CLAUDE_CREDENTIALS_PATH", str(_default_creds)))
 USAGE_URL        = "https://api.anthropic.com/api/oauth/usage"
 USER_AGENT       = "claude-code/1.0.0"
 
-CACHE_TTL_OK     = 180     # min seconds between upstream calls on success
-CACHE_TTL_ERR    = 30      # retry sooner after an error
-TREND_MAX        = 64      # samples kept per trend series
+CACHE_TTL_OK     = _env_int("USAGE_CACHE_TTL", 180)   # min seconds between upstream calls on success
+CACHE_TTL_ERR    = _env_int("USAGE_CACHE_TTL_ERR", 30)  # retry sooner after an error
+TREND_MAX        = _env_int("USAGE_TREND_MAX", 64)     # samples kept per trend series
 
 HERE         = Path(__file__).parent.resolve()
 HISTORY_FILE = HERE / "usage_history.json"
@@ -40,11 +54,34 @@ PID_FILE     = HERE / "server.pid"
 TOKEN_REFRESH_THRESHOLD_S = 30 * 60   # refresh when this little time is left
 TOKEN_REFRESH_COOLDOWN_S  = 30 * 60   # don't try refreshing again within this
 
-HOST = "0.0.0.0"   # ESP needs LAN access; keep this behind your firewall
-PORT = 8080
+HOST = _env("USAGE_HOST", "0.0.0.0")   # ESP needs LAN access; keep this behind your firewall
+PORT = _env_int("USAGE_PORT", 8080)
+
+# The /raw route leaks the full, unfiltered upstream payload (account info and
+# all), so it's off unless you explicitly opt in.
+EXPOSE_RAW = _env("USAGE_EXPOSE_RAW", "0").lower() in ("1", "true", "yes", "on")
 # ==================================================
 
-WEEKDAYS_DE = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+# Weekday abbreviations used for reset labels more than a day out. English by
+# default; set DISPLAY_LOCALE=de for German (Mo/Di/Mi...), or supply a custom
+# comma-separated list of 7 labels (Mon-first) via WEEKDAY_LABELS.
+_WEEKDAYS = {
+    "en": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+    "de": ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"],
+}
+
+
+def _resolve_weekdays() -> list:
+    custom = os.environ.get("WEEKDAY_LABELS")
+    if custom:
+        parts = [p.strip() for p in custom.split(",")]
+        if len(parts) == 7:
+            return parts
+    locale = _env("DISPLAY_LOCALE", "en").lower()
+    return _WEEKDAYS.get(locale, _WEEKDAYS["en"])
+
+
+WEEKDAYS = _resolve_weekdays()
 
 logger = logging.getLogger("claude-usage")
 logger.setLevel(logging.INFO)
@@ -250,7 +287,7 @@ def reset_labels(iso_str):
         else:       rel = f"{m}m"
         local = dt.astimezone()
         if sec > 86400:
-            abs_lbl = f"{WEEKDAYS_DE[local.weekday()]} {local.strftime('%H:%M')}"
+            abs_lbl = f"{WEEKDAYS[local.weekday()]} {local.strftime('%H:%M')}"
         else:
             abs_lbl = local.strftime("%H:%M")
         return (rel, abs_lbl, sec)
@@ -415,19 +452,34 @@ def route_health():
 @app.route("/raw")
 def route_raw():
     # Debug only - returns the full upstream payload, account info and all.
+    # Disabled unless USAGE_EXPOSE_RAW is set, and even then only answered for
+    # loopback callers so account data can't be scraped from the LAN.
+    if not EXPOSE_RAW:
+        return jsonify({"ok": False, "error": "raw disabled (set USAGE_EXPOSE_RAW=1)"}), 404
+    if request.remote_addr not in ("127.0.0.1", "::1", "localhost"):
+        return jsonify({"ok": False, "error": "raw is localhost-only"}), 403
     data, err, _ = fetch_raw()
     return jsonify({"ok": err is None, "error": err, "data": data})
 
 
+DASHBOARD_FILE = HERE / "dashboard.html"
+
+
 @app.route("/")
 def route_root():
-    return (
-        "claude-usage\n"
-        "  GET /usage   - ESP-shaped JSON\n"
-        "  GET /refresh - force a fresh fetch\n"
-        "  GET /health  - status snapshot (no API call)\n"
-        "  GET /raw     - raw upstream response (debug)\n"
-    )
+    # Serve the human-facing dashboard when it's present; fall back to a plain
+    # endpoint listing so the server still self-documents without the file.
+    try:
+        return Response(DASHBOARD_FILE.read_text(encoding="utf-8"), mimetype="text/html")
+    except OSError:
+        return Response(
+            "claude-usage\n"
+            "  GET /        - dashboard (dashboard.html missing)\n"
+            "  GET /usage   - ESP-shaped JSON\n"
+            "  GET /refresh - force a fresh fetch\n"
+            "  GET /health  - status snapshot (no API call)\n",
+            mimetype="text/plain",
+        )
 
 
 # ===================== Entrypoint =====================

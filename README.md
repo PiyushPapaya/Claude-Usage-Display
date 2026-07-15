@@ -18,7 +18,7 @@ pip install -r requirements.txt
 python server.py
 ```
 
-Then it's on `http://localhost:8080`. Quick check:
+Then it's on `http://localhost:8080`. Open that in a browser for the **dashboard** — a live, theme-aware view of the same data the OLED shows (session/weekly bars, per-model breakdown, trend sparklines). Quick health check:
 
 ```
 curl http://localhost:8080/health
@@ -30,10 +30,27 @@ On Windows you can use `start.bat` instead — it launches the server headless v
 
 | Route | What |
 |-------|------|
+| `/` | Web dashboard (HTML). Falls back to a plain endpoint listing if `dashboard.html` is missing. |
 | `/usage` | The JSON the ESP consumes. Cached (3 min); this is what the display polls. |
 | `/refresh` | Forces a fresh fetch without skewing the trend history. |
 | `/health` | Status snapshot with no API call — cache age, token expiry, last error. |
-| `/raw` | The unfiltered response from Anthropic. Debug only, can include account info. |
+| `/raw` | The unfiltered response from Anthropic. **Disabled by default** (leaks account info); set `USAGE_EXPOSE_RAW=1` and call from localhost to enable. |
+
+### Configuration
+
+Everything below can be set as an environment variable — no need to edit `server.py`.
+
+| Variable | Default | What |
+|----------|---------|------|
+| `USAGE_HOST` | `0.0.0.0` | Bind address. `0.0.0.0` so the ESP on the LAN can reach it. |
+| `USAGE_PORT` | `8080` | Port. |
+| `DISPLAY_LOCALE` | `en` | Weekday labels for reset times. `en` (Mon/Tue…) or `de` (Mo/Di…). |
+| `WEEKDAY_LABELS` | — | Override the 7 weekday labels directly, Mon-first, comma-separated. |
+| `USAGE_CACHE_TTL` | `180` | Min seconds between upstream calls on success. |
+| `USAGE_CACHE_TTL_ERR` | `30` | Retry interval after an error. |
+| `USAGE_TREND_MAX` | `64` | Samples kept per trend sparkline. |
+| `CLAUDE_CREDENTIALS_PATH` | `~/.claude/.credentials.json` | Where to read the OAuth token. |
+| `USAGE_EXPOSE_RAW` | `0` | Set to `1` to enable the localhost-only `/raw` debug route. |
 
 ### Token refresh
 
@@ -75,10 +92,35 @@ The pages rotate automatically every few seconds, with a small pixel-Claude anim
 
 Bottom-left has a tiny status glyph: WiFi down, server unreachable, data stale (>10 min), or all good. On a fresh fetch you get a brief checkmark top-right.
 
+## Screenshots
+
+The web dashboard and the OLED show the same data. Drop images in a `docs/`
+folder and link them here:
+
+<!--
+![Web dashboard](docs/dashboard.png)
+![OLED display](docs/oled.jpg)
+![Wiring](docs/wiring.png)
+-->
+
+## Development
+
+Pure helpers in `server.py` (label formatting, percentage rounding, reset-time
+math, locale resolution) are covered by tests:
+
+```
+pip install -r requirements-dev.txt
+pytest
+```
+
 ## Notes
 
 This is built around Windows — `start.bat`/`stop.bat` are batch files. The server itself (`server.py`) is platform-independent though and runs fine on Linux/macOS, you just start it by hand.
 
-The usage endpoint isn't officially documented; it's the same one Claude Desktop and Claude Code use for `/usage`. So if Anthropic changes the format, the display can break until `server.py` is updated. The weekday labels (`Mo`, `Di`, …) are currently hardcoded to German.
+The usage endpoint isn't officially documented; it's the same one Claude Desktop and Claude Code use for `/usage`. So if Anthropic changes the format, the display can break until `server.py` is updated. Weekday labels in reset times default to English; set `DISPLAY_LOCALE=de` for German (`Mo`, `Di`, …) or `WEEKDAY_LABELS` for anything else.
 
-The server binds to `0.0.0.0` so the ESP can reach it. Keep it behind your router/firewall — `/raw` returns whatever Anthropic sends, unfiltered.
+The server binds to `0.0.0.0` so the ESP can reach it. Keep it behind your router/firewall. `/raw` (unfiltered account data) is off unless you opt in with `USAGE_EXPOSE_RAW=1`, and even then only answers localhost.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
