@@ -42,7 +42,30 @@ static const unsigned long WIFI_BACKOFF_CAP = 60000;   // max reconnect wait
 #define MAX_MODELS 6
 #define TREND_MAX  64
 
-U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0);
+// ---- Display / I2C ----------------------------------------------------------
+// Pick your OLED controller. SH1106 and SSD1306 are the two common 128x64 I2C
+// panels; they're pin-compatible but address memory differently, so the wrong
+// one shows shifted text or noise. If the display looks wrong, switch these.
+// Can also be set from secrets.h (define OLED_SSD1306 there) without editing
+// this file.
+#if !defined(OLED_SH1106) && !defined(OLED_SSD1306)
+  #define OLED_SH1106
+#endif
+
+// I2C pins. Defaults match the wiring in the README (SDA=D2, SCL=D1); override
+// in secrets.h if your board differs.
+#ifndef OLED_SDA
+  #define OLED_SDA D2
+#endif
+#ifndef OLED_SCL
+  #define OLED_SCL D1
+#endif
+
+#if defined(OLED_SSD1306)
+  U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0);
+#else
+  U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0);
+#endif
 
 // ============================================================
 // Dynamic page list
@@ -993,7 +1016,7 @@ void connectWiFiAnimated() {
 void setup() {
   Serial.begin(115200);
   delay(100);
-  Wire.begin(D2, D1);
+  Wire.begin(OLED_SDA, OLED_SCL);
   u8g2.begin();
 
   bootEntryMs = millis();

@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  server:
+    name: Server (lint + tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt ruff
+      - name: Lint
+        run: ruff check server.py tests
+      - name: Tests
+        run: pytest -q
+
+  firmware:
+    name: Firmware (compile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up arduino-cli
+        uses: arduino/setup-arduino-cli@v1
+      - name: Install ESP8266 core + libraries
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls \
+            https://arduino.esp8266.com/stable/package_esp8266com_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp8266:esp8266
+          arduino-cli lib install ArduinoJson U8g2
+      - name: Provide a dummy secrets.h
+        run: |
+          cp claude_usage_display/secrets.h.example claude_usage_display/secrets.h
+      - name: Compile sketch
+        run: |
+          arduino-cli compile \
+            --fqbn esp8266:esp8266:nodemcuv2 \
+            claude_usage_display

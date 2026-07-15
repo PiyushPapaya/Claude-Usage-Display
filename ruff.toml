@@ -1,0 +1,7 @@
+# The server deliberately uses aligned one-liner guards (`if x: return y`) for
+# compact, table-like readability. E701 flags those, so it's disabled here; the
+# rest of ruff's default checks still run.
+line-length = 100
+
+[lint]
+ignore = ["E701"]

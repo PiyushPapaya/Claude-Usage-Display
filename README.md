@@ -58,7 +58,7 @@ The OAuth token expires regularly. When less than 30 minutes are left, the serve
 
 ## Flashing the display
 
-Hardware: an ESP8266 (NodeMCU or similar) and an SH1106 OLED, 128×64, over I2C. Wiring as set in the sketch: `SDA = D2`, `SCL = D1`.
+Hardware: an ESP8266 (NodeMCU or similar) and a 128×64 I2C OLED. Both common controllers are supported — **SH1106** (default) and **SSD1306**; if the display shows shifted text or noise, it's the other one, so add `#define OLED_SSD1306` to your `secrets.h`. Wiring defaults to `SDA = D2`, `SCL = D1` (override with `OLED_SDA`/`OLED_SCL` in `secrets.h`).
 
 Arduino libraries:
 
@@ -115,7 +115,7 @@ pytest
 
 ## Notes
 
-This is built around Windows — `start.bat`/`stop.bat` are batch files. The server itself (`server.py`) is platform-independent though and runs fine on Linux/macOS, you just start it by hand.
+On Windows use `start.bat`/`stop.bat`. On Linux/macOS use `./run.sh` (foreground), or install the systemd unit in [`docs/claude-usage.service`](docs/claude-usage.service) for an always-on background service. The server itself (`server.py`) is platform-independent.
 
 The usage endpoint isn't officially documented; it's the same one Claude Desktop and Claude Code use for `/usage`. So if Anthropic changes the format, the display can break until `server.py` is updated. Weekday labels in reset times default to English; set `DISPLAY_LOCALE=de` for German (`Mo`, `Di`, …) or `WEEKDAY_LABELS` for anything else.
 

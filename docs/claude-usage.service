@@ -1,0 +1,33 @@
+# systemd unit for an always-on Claude usage server (Linux).
+#
+# Install:
+#   1. Edit the paths and User below to match your setup.
+#   2. sudo cp docs/claude-usage.service /etc/systemd/system/
+#   3. sudo systemctl daemon-reload
+#   4. sudo systemctl enable --now claude-usage
+#
+# Check it:   systemctl status claude-usage
+# Follow logs: journalctl -u claude-usage -f
+#
+# Note: the token-refresh feature shells out to `claude`, so the service User
+# must be the same account that ran `claude` login (its credentials live in
+# ~/.claude/.credentials.json).
+
+[Unit]
+Description=Claude usage server (OLED display backend)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/home/YOUR_USER/Claude-Token-OLED
+ExecStart=/usr/bin/python3 server.py
+Restart=on-failure
+RestartSec=5
+# Uncomment to change defaults:
+# Environment=USAGE_PORT=8080
+# Environment=DISPLAY_LOCALE=en
+
+[Install]
+WantedBy=multi-user.target
