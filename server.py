@@ -405,19 +405,34 @@ def compute(record_history=True):
 # ===================== Flask =====================
 app = Flask(__name__)
 _cache = {"d": None, "t": 0.0, "err": False}
-_cache_lock = threading.Lock()
+_cache_lock = threading.Lock()   # guards the cache dict only, never held across I/O
+_fetch_lock = threading.Lock()   # serializes upstream fetches (no thundering herd)
+
+
+def _cache_is_fresh(force):
+    now = time.time()
+    ttl = CACHE_TTL_ERR if _cache["err"] else CACHE_TTL_OK
+    return _cache["d"] is not None and not force and now - _cache["t"] <= ttl
 
 
 def _compute_cached(force=False, record_history=True):
+    # Fast path: return cached data without touching the network or blocking.
     with _cache_lock:
-        now = time.time()
-        ttl = CACHE_TTL_ERR if _cache["err"] else CACHE_TTL_OK
-        if force or _cache["d"] is None or now - _cache["t"] > ttl:
-            d = compute(record_history=record_history)
+        if _cache_is_fresh(force):
+            return _cache["d"]
+
+    # Slow path: one fetch at a time. Crucially we do NOT hold _cache_lock during
+    # compute()'s network call, so /health and concurrent /usage stay responsive.
+    with _fetch_lock:
+        with _cache_lock:
+            if _cache_is_fresh(force):
+                return _cache["d"]   # another thread refreshed while we waited
+        d = compute(record_history=record_history)
+        with _cache_lock:
             _cache["d"]   = d
-            _cache["t"]   = now
+            _cache["t"]   = time.time()
             _cache["err"] = not d.get("ok", False)
-        return _cache["d"]
+            return _cache["d"]
 
 
 @app.route("/usage")
@@ -438,11 +453,13 @@ def route_health():
         d   = _cache["d"]
         age = (time.time() - _cache["t"]) if d else None
     _, token_err, sec = load_token()
+    refresh_ago = int(time.time() - _last_token_refresh) if _last_token_refresh else None
     return jsonify({
         "ok":                  bool(d and d.get("ok")),
         "cache_age_sec":       int(age) if age is not None else None,
         "token_error":         token_err,
         "token_expires_in_sec": sec,
+        "last_token_refresh_ago_sec": refresh_ago,
         "history_5h_count":    len(_history_5h),
         "history_7d_count":    len(_history_7d),
         "last_error":          (d or {}).get("error"),

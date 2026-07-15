@@ -102,6 +102,21 @@ def test_weekly_projection_extrapolates():
     assert projected == 20
 
 
+# ---------------- cache freshness ----------------
+def test_cache_freshness(monkeypatch):
+    import time as _t
+    server._cache.update({"d": {"ok": True}, "t": _t.time(), "err": False})
+    assert server._cache_is_fresh(force=False) is True
+    # force always misses.
+    assert server._cache_is_fresh(force=True) is False
+    # An empty cache is never fresh.
+    server._cache.update({"d": None, "t": 0.0, "err": False})
+    assert server._cache_is_fresh(force=False) is False
+    # Aged past the TTL -> stale.
+    server._cache.update({"d": {"ok": True}, "t": _t.time() - server.CACHE_TTL_OK - 5, "err": False})
+    assert server._cache_is_fresh(force=False) is False
+
+
 # ---------------- locale resolution ----------------
 def test_weekday_resolution_env(monkeypatch):
     monkeypatch.setenv("DISPLAY_LOCALE", "de")
