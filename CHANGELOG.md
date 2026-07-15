@@ -29,6 +29,9 @@ All notable changes to this project are documented here. Format loosely follows
 ### Security
 - `/raw` (unfiltered upstream payload, includes account info) is disabled by
   default and localhost-only when enabled via `USAGE_EXPOSE_RAW=1`.
+- Optional `USAGE_TOKEN` shared secret gates `/usage` and `/refresh` (via
+  `X-Usage-Token` header or `?token=`), so usage can't be scraped by other LAN
+  devices. Loopback is exempt; the ESP and dashboard forward the token.
 
 ### Fixed
 - Cache lock is no longer held across the network fetch, so `/health` stays

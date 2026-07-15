@@ -487,6 +487,9 @@ bool pingServer() {
   HTTPClient http;
   http.setTimeout(4000);
   if (!http.begin(client, SERVER_URL)) { serverAlive = false; return false; }
+#ifdef USAGE_TOKEN
+  http.addHeader("X-Usage-Token", USAGE_TOKEN);
+#endif
   int code = http.GET();
   http.end();
   serverAlive = (code == 200);
@@ -511,6 +514,9 @@ bool fetchUsage() {
   HTTPClient http;
   http.setTimeout(8000);
   if (!http.begin(client, SERVER_URL)) { lastError = "begin"; serverAlive = false; return false; }
+#ifdef USAGE_TOKEN
+  http.addHeader("X-Usage-Token", USAGE_TOKEN);
+#endif
   int code = http.GET();
   if (code != 200) {
     lastError = "http " + String(code);

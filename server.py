@@ -60,6 +60,12 @@ PORT = _env_int("USAGE_PORT", 8080)
 # The /raw route leaks the full, unfiltered upstream payload (account info and
 # all), so it's off unless you explicitly opt in.
 EXPOSE_RAW = _env("USAGE_EXPOSE_RAW", "0").lower() in ("1", "true", "yes", "on")
+
+# Optional shared secret. When set, /usage and /refresh require it (via the
+# X-Usage-Token header or a ?token= query param) so only your ESP — and anyone
+# you hand the token to — can read usage off the LAN. Loopback is always exempt
+# so the local dashboard and curl keep working. Empty = no auth (default).
+USAGE_TOKEN = _env("USAGE_TOKEN", "").strip()
 # ==================================================
 
 # Weekday abbreviations used for reset labels more than a day out. English by
@@ -435,13 +441,27 @@ def _compute_cached(force=False, record_history=True):
             return _cache["d"]
 
 
+def _token_ok():
+    """True when the request may read usage data."""
+    if not USAGE_TOKEN:
+        return True
+    if request.remote_addr in ("127.0.0.1", "::1", "localhost"):
+        return True
+    supplied = request.headers.get("X-Usage-Token") or request.args.get("token")
+    return supplied == USAGE_TOKEN
+
+
 @app.route("/usage")
 def route_usage():
+    if not _token_ok():
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
     return jsonify(_compute_cached())
 
 
 @app.route("/refresh")
 def route_refresh():
+    if not _token_ok():
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
     log("manual /refresh requested")
     # Force a fetch, but don't record a sample - that would skew the spacing.
     return jsonify(_compute_cached(force=True, record_history=False))

@@ -117,6 +117,33 @@ def test_cache_freshness(monkeypatch):
     assert server._cache_is_fresh(force=False) is False
 
 
+# ---------------- token auth ----------------
+def test_token_ok(monkeypatch):
+    # No token configured -> everything allowed.
+    monkeypatch.setattr(server, "USAGE_TOKEN", "")
+    with server.app.test_request_context("/usage"):
+        assert server._token_ok() is True
+
+    monkeypatch.setattr(server, "USAGE_TOKEN", "secret")
+    lan = {"REMOTE_ADDR": "192.168.1.9"}
+
+    # LAN caller with no/wrong token -> denied.
+    with server.app.test_request_context("/usage", environ_base=lan):
+        assert server._token_ok() is False
+    with server.app.test_request_context("/usage", headers={"X-Usage-Token": "nope"}, environ_base=lan):
+        assert server._token_ok() is False
+
+    # Correct token via header or query param -> allowed.
+    with server.app.test_request_context("/usage", headers={"X-Usage-Token": "secret"}, environ_base=lan):
+        assert server._token_ok() is True
+    with server.app.test_request_context("/usage?token=secret", environ_base=lan):
+        assert server._token_ok() is True
+
+    # Loopback is always exempt, even with a token set.
+    with server.app.test_request_context("/usage", environ_base={"REMOTE_ADDR": "127.0.0.1"}):
+        assert server._token_ok() is True
+
+
 # ---------------- locale resolution ----------------
 def test_weekday_resolution_env(monkeypatch):
     monkeypatch.setenv("DISPLAY_LOCALE", "de")

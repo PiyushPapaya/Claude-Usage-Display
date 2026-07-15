@@ -51,6 +51,12 @@ Everything below can be set as an environment variable — no need to edit `serv
 | `USAGE_TREND_MAX` | `64` | Samples kept per trend sparkline. |
 | `CLAUDE_CREDENTIALS_PATH` | `~/.claude/.credentials.json` | Where to read the OAuth token. |
 | `USAGE_EXPOSE_RAW` | `0` | Set to `1` to enable the localhost-only `/raw` debug route. |
+| `USAGE_TOKEN` | — | Optional shared secret. When set, `/usage` and `/refresh` require it (localhost exempt) so only your ESP can read usage off the LAN. |
+
+If you set `USAGE_TOKEN`, put the same value in the ESP's `secrets.h`
+(`#define USAGE_TOKEN "..."`) and open the dashboard with it in the URL:
+`http://<host>:8080/?token=...`. Requests from the same machine are always
+allowed without it.
 
 ### Token refresh
 

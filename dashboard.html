@@ -194,9 +194,14 @@ function spark(el, arr) {
   }
 }
 
+// If the server requires a token, pass it as ?token=... in this page's URL
+// (e.g. http://host:8080/?token=abc). We forward it as a header on each fetch.
+const AUTH_TOKEN = new URLSearchParams(location.search).get("token");
+
 async function tick(force) {
   try {
-    const r = await fetch(force ? "/refresh" : "/usage", { cache: "no-store" });
+    const headers = AUTH_TOKEN ? { "X-Usage-Token": AUTH_TOKEN } : {};
+    const r = await fetch(force ? "/refresh" : "/usage", { cache: "no-store", headers });
     const d = await r.json();
     render(d);
   } catch (e) {
