@@ -196,17 +196,32 @@ function spark(el, arr) {
 
 // If the server requires a token, pass it as ?token=... in this page's URL
 // (e.g. http://host:8080/?token=abc). We forward it as a header on each fetch.
-const AUTH_TOKEN = new URLSearchParams(location.search).get("token");
+const params = new URLSearchParams(location.search);
+const AUTH_TOKEN = params.get("token");
+
+// Where to reach the usage server. When this page is served by server.py the
+// origin already matches, so relative paths just work. But when the file is
+// opened directly (file://) or hosted elsewhere, "/usage" points nowhere and
+// the fetch fails ("unreachable"). In that case fall back to a base URL:
+//   - ?api=http://<host>:8080  explicit override (use for a remote server)
+//   - otherwise default to http://localhost:8080 when opened as a file.
+const API_BASE = (
+  params.get("api") ||
+  (location.protocol === "file:" ? "http://localhost:8080" : "")
+).replace(/\/+$/, "");
 
 async function tick(force) {
   try {
     const headers = AUTH_TOKEN ? { "X-Usage-Token": AUTH_TOKEN } : {};
-    const r = await fetch(force ? "/refresh" : "/usage", { cache: "no-store", headers });
+    const url = API_BASE + (force ? "/refresh" : "/usage")
+      + (AUTH_TOKEN ? "?token=" + encodeURIComponent(AUTH_TOKEN) : "");
+    const r = await fetch(url, { cache: "no-store", headers });
     const d = await r.json();
     render(d);
   } catch (e) {
     $("dot").className = "dot err";
-    $("status").textContent = "unreachable";
+    $("status").textContent = API_BASE ? "unreachable (" + API_BASE + ")" : "unreachable";
+    $("updated").textContent = "open this page via the server (e.g. http://<host>:8080/) or add ?api=http://<host>:8080";
   }
 }
 

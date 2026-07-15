@@ -410,6 +410,24 @@ def compute(record_history=True):
 
 # ===================== Flask =====================
 app = Flask(__name__)
+
+
+@app.after_request
+def _cors(resp):
+    # The dashboard may be opened as a local file (file://) or hosted on a
+    # different origin than the server, in which case the browser treats
+    # /usage as a cross-origin request. Allow it so the web page can read the
+    # same data the OLED does. Access is still gated by USAGE_TOKEN when set.
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Headers"] = "X-Usage-Token, Content-Type"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    return resp
+
+
+# Flask auto-answers the browser's CORS preflight (OPTIONS) for these GET
+# routes without invoking the view, so the token gate is skipped for preflight
+# and the after_request hook above attaches the CORS headers.
+
 _cache = {"d": None, "t": 0.0, "err": False}
 _cache_lock = threading.Lock()   # guards the cache dict only, never held across I/O
 _fetch_lock = threading.Lock()   # serializes upstream fetches (no thundering herd)
