@@ -10,6 +10,7 @@ ESP8266 display expects and serves it over the LAN.
 import json
 import sys
 import os
+import re
 import time
 import threading
 import subprocess
@@ -18,6 +19,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from datetime import datetime, timezone
 from collections import deque
+from urllib.parse import urlsplit
 import urllib.request
 import urllib.error
 
@@ -411,22 +413,66 @@ def compute(record_history=True):
 # ===================== Flask =====================
 app = Flask(__name__)
 
+# file:// pages send "Origin: null". Allow that by default so the dashboard
+# still works when opened directly, but let it be turned off for a stricter
+# deployment.
+ALLOW_FILE_ORIGIN = _env("USAGE_ALLOW_FILE_ORIGIN", "1").lower() in ("1", "true", "yes", "on")
+
+_PRIVATE_IPV4_RE = re.compile(r"^(\d+)\.(\d+)\.\d+\.\d+$")
+
+
+def _host_is_private(host: str) -> bool:
+    """True for loopback / private-LAN / *.local hosts - the only places this
+    usage server legitimately runs."""
+    host = (host or "").lower().strip("[]")
+    if host in ("localhost", "::1") or host.endswith(".local"):
+        return True
+    m = _PRIVATE_IPV4_RE.match(host)
+    if not m:
+        return False
+    a, b = int(m.group(1)), int(m.group(2))
+    return (
+        a == 127                              # 127.0.0.0/8 loopback
+        or a == 10                            # 10.0.0.0/8
+        or (a == 192 and b == 168)            # 192.168.0.0/16
+        or (a == 172 and 16 <= b <= 31)       # 172.16.0.0/12
+    )
+
+
+def _origin_allowed(origin: str) -> bool:
+    if not origin:
+        return False
+    if origin == "null":
+        return ALLOW_FILE_ORIGIN
+    try:
+        u = urlsplit(origin)
+        return u.scheme in ("http", "https") and _host_is_private(u.hostname or "")
+    except Exception:
+        return False
+
 
 @app.after_request
 def _cors(resp):
     # The dashboard may be opened as a local file (file://) or hosted on a
-    # different origin than the server, in which case the browser treats
-    # /usage as a cross-origin request. Allow it so the web page can read the
-    # same data the OLED does. Access is still gated by USAGE_TOKEN when set.
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    resp.headers["Access-Control-Allow-Headers"] = "X-Usage-Token, Content-Type"
-    resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    # different LAN box than the server, so the browser treats /usage as a
+    # cross-origin request. Rather than a blanket "Allow-Origin: *" - which
+    # would let ANY website your browser visits read your usage data from a
+    # loopback server - only echo back origins we trust (loopback, private
+    # LAN, or file://). Public origins get no CORS header, so the browser
+    # blocks them from reading the response.
+    origin = request.headers.get("Origin")
+    if _origin_allowed(origin):
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Vary"] = "Origin"
+        resp.headers["Access-Control-Allow-Headers"] = "X-Usage-Token, Content-Type"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
     return resp
 
 
 # Flask auto-answers the browser's CORS preflight (OPTIONS) for these GET
 # routes without invoking the view, so the token gate is skipped for preflight
-# and the after_request hook above attaches the CORS headers.
+# and the after_request hook above attaches the CORS headers when the origin
+# is trusted.
 
 _cache = {"d": None, "t": 0.0, "err": False}
 _cache_lock = threading.Lock()   # guards the cache dict only, never held across I/O

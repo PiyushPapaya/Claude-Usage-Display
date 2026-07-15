@@ -144,6 +144,44 @@ def test_token_ok(monkeypatch):
         assert server._token_ok() is True
 
 
+# ---------------- CORS origin gating ----------------
+def test_host_is_private():
+    for good in ("localhost", "::1", "nas.local", "127.0.0.1",
+                 "10.1.2.3", "192.168.1.50", "172.16.0.1", "172.31.255.9"):
+        assert server._host_is_private(good) is True, good
+    for bad in ("evil.com", "8.8.8.8", "172.15.0.1", "172.32.0.1", "169.254.1.1", ""):
+        assert server._host_is_private(bad) is False, bad
+
+
+def test_origin_allowed(monkeypatch):
+    monkeypatch.setattr(server, "ALLOW_FILE_ORIGIN", True)
+    assert server._origin_allowed("http://192.168.1.50:8080") is True
+    assert server._origin_allowed("http://localhost:8080") is True
+    assert server._origin_allowed("null") is True
+    # Public origins and junk are rejected.
+    assert server._origin_allowed("https://evil.com") is False
+    assert server._origin_allowed("http://8.8.8.8") is False
+    assert server._origin_allowed("") is False
+    assert server._origin_allowed(None) is False
+    # file:// can be turned off.
+    monkeypatch.setattr(server, "ALLOW_FILE_ORIGIN", False)
+    assert server._origin_allowed("null") is False
+
+
+def test_cors_header_only_for_trusted_origin():
+    c = server.app.test_client()
+    # Trusted origin is reflected back exactly (never "*").
+    r = c.get("/usage", headers={"Origin": "http://192.168.1.50:8080"})
+    assert r.headers.get("Access-Control-Allow-Origin") == "http://192.168.1.50:8080"
+    assert "Origin" in r.headers.get("Vary", "")
+    # Public origin gets no CORS header, so the browser blocks the read.
+    r = c.get("/usage", headers={"Origin": "https://evil.com"})
+    assert r.headers.get("Access-Control-Allow-Origin") is None
+    # Same-origin (no Origin header) needs no CORS header.
+    r = c.get("/usage")
+    assert r.headers.get("Access-Control-Allow-Origin") is None
+
+
 # ---------------- locale resolution ----------------
 def test_weekday_resolution_env(monkeypatch):
     monkeypatch.setenv("DISPLAY_LOCALE", "de")

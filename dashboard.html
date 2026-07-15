@@ -201,6 +201,17 @@ function spark(el, arr) {
 const params = new URLSearchParams(location.search);
 const AUTH_TOKEN = params.get("token");
 
+// Once read, scrub the token out of the visible URL so it doesn't linger in
+// browser history, bookmarks, or the Referer header on outbound links. The
+// value stays in memory (AUTH_TOKEN) for this session only.
+if (AUTH_TOKEN && window.history && history.replaceState) {
+  try {
+    const clean = new URL(location.href);
+    clean.searchParams.delete("token");
+    history.replaceState(null, "", clean.toString());
+  } catch (e) { /* non-fatal */ }
+}
+
 // Only permit the API base to point at this machine or a private LAN address -
 // the only places this usage server legitimately runs. This stops a crafted
 // ?api=... link from redirecting requests (and the token header) to an
